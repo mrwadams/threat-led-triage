@@ -1,0 +1,2071 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-08-26T20:15:02.336056+00:00",
+  "target": "/Users/matt/Documents/dev/crapi",
+  "overview": "OWASP crAPI (Completely Ridiculous API) is a microservices-based web application designed to demonstrate API security vulnerabilities. It consists of an API Gateway, an Identity microservice (Java/Spring), a Community microservice (Go/MongoDB/Postgres), a Chatbot microservice (Python), and associated database and deployment configurations.",
+  "data_flow_diagram": "flowchart TD\n    subgraph tb0[\"Untrusted External Zone\"]\n        user[\"End User / Client App\"]\n    end\n    subgraph tb1[\"Internal Application Cluster\"]\n        gateway((\"API Gateway\"))\n        identity((\"Identity Service (Java/Spring)\"))\n        community((\"Community Service (Go)\"))\n        chatbot((\"Chatbot Service (Python)\"))\n        mailservice((\"Mock Mail Service\"))\n        dbidentity[(\"Identity Database (Postgres)\")]\n        dbcommunitypg[(\"Community Database (Postgres)\")]\n        dbcommunitymongo[(\"Community DB (MongoDB)\")]\n    end\n    user -->|HTTPS API Requests & Credentials| gateway\n    gateway -->|HTTPS Responses & JWT Tokens| user\n    gateway -->|Forwarded Auth/Registration/OTP requests| identity\n    identity -->|JWTs, User profile data| gateway\n    gateway -->|Forwarded Community/Coupon requests| community\n    community -->|Posts, Comments, Coupons| gateway\n    gateway -->|Forwarded Chatbot queries| chatbot\n    chatbot -->|Chatbot replies| gateway\n    identity -->|Read/Write user credentials & OTPs| dbidentity\n    dbidentity -->|User records, OTP details| identity\n    community -->|Read/Write Coupons| dbcommunitypg\n    dbcommunitypg -->|Coupon records| community\n    community -->|Read/Write Posts & Comments| dbcommunitymongo\n    dbcommunitymongo -->|Posts & Comments data| community\n    identity -->|SMTP/HTTP Send Mail trigger| mailservice\n    mailservice -->|OTP email content retrieval| user\n    classDef trustBoundary stroke-dasharray: 5 5,fill:transparent;\n    class tb0 trustBoundary;\n    class tb1 trustBoundary;",
+  "subsystems": [
+    {
+      "name": "Identity & Access Management",
+      "threats": [
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "JWT algorithm confusion (RS256 -> HS256). JwtProvider.validateJwtToken() trusts the algorithm declared in the token header. For HS256 tokens it derives the HMAC secret from the RSA public key (base64-encoded public key string) or returns the hardcoded string 'AA==' when the kid header contains '/dev/null'. The public key is served unauthenticated at /identity/api/auth/jwks.json, so an attacker can sign an HS256 token with a known key and set an arbitrary 'sub' (e.g. admin@example.com). The JwtAuthTokenFilter then loads that user and grants their authorities.",
+          "Potential Impact": "Attacker forges valid tokens for any user, including seeded admin accounts, leading to full identity/account takeover.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            },
+            {
+              "id": "T1556",
+              "name": "Modify Authentication Process"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "Unsecured (alg:none / plain) JWT accepted. JwtProvider.validateJwtToken() catches ParseException from SignedJWT.parse() and falls back to PlainJWT.parse(authToken), returning true for an unsigned plaintext JWT. An attacker sends 'Authorization: Bearer <plain JWT with sub=victim>' and the filter authenticates the request as that victim.",
+          "Potential Impact": "Identity spoofing without possession of any signing key; unauthorized access to protected endpoints.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "API key path skips signature validation. In JwtAuthTokenFilter.getUserFromToken(), ApiKey-typed Authorization headers call tokenProvider.getUserNameFromJwtToken(token) WITHOUT calling validateJwtToken(). Because getUserNameFromJwtToken() only parses the token and reads the 'sub' claim, any crafted/unsigned JWT with a victim's email as subject is accepted as a valid API key.",
+          "Potential Impact": "Trivial impersonation of any user (including admins) simply by forging an ApiKey header; bypasses the API-key authentication mechanism.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            },
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "JKU header trusted for signature verification. For non-HS256 tokens, getKeyFromJkuHeader() fetches the 'jku' URL from the token header and uses the returned JWKS key to verify the signature. There is no allowlist of trusted JKU hosts/keys, so an attacker can host their own JWKS and forge tokens signed with their own private key.",
+          "Potential Impact": "Token forgery and identity impersonation for arbitrary users.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "OTP brute force enables password reset. Forgot-password generates a 4-digit OTP using OTPGenerator.generateRandom() (Math.random(), non-cryptographic RNG), stores it in the database, and validateOtp() (POST /identity/api/auth/v2/check-otp) allows unlimited guesses with no expiry and no attempt limit. An attacker requests an OTP for a victim email and brute-forces the 10,000 possible values, then resets the password.",
+          "Potential Impact": "Full account takeover of any registered user whose email is known or enumerated.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1110",
+              "name": "Brute Force"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "JWT expiration is never enforced. validateJwtToken() calls SignedJWT.verify() which verifies only the signature, not the 'exp' claim. generateApiKey() also creates tokens with no expiration at all. Stolen, leaked, or previously valid tokens remain accepted indefinitely.",
+          "Potential Impact": "Long-lived credential abuse; leaked tokens provide persistent unauthorized access.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1528",
+              "name": "Steal Application Access Token"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "Unauthenticated test-user password reset. POST /identity/api/auth/reset-test-users is under permitAll in WebSecurityConfig and resets every seeded user (including admin@example.com) to the known passwords listed in TestUsers.java. An attacker invokes this endpoint, then logs in with the known admin password.",
+          "Potential Impact": "Complete platform compromise by resetting and then using privileged/admin credentials.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1098",
+              "name": "Account Manipulation"
+            },
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "Command injection via video conversion parameters. An authenticated user can set arbitrary 'conversion_params' through PUT /identity/api/v2/user/videos/{video_id} (ProfileServiceImpl.updateProfileVideo() does not validate the field). The convert_video endpoint then builds a shell command with String.format() and executes it via BashCommand.executeBashCommand() using 'bash -c' when ENABLE_SHELL_INJECTION is true. An attacker sets conversion_params to shell metacharacters (e.g. '; rm -rf / ;' or a reverse shell).",
+          "Potential Impact": "Remote code execution on the identity service host with the service account's privileges.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1059",
+              "name": "Command and Scripting Interpreter"
+            },
+            {
+              "id": "T1674",
+              "name": "Input Injection"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "Admin video delete endpoint is missing the ADMIN role check (BOLA). WebSecurityConfig only enforces hasRole('ADMIN') on /identity/management/admin/**, but ProfileController.deleteVideoBOLA() is mapped to /identity/api/v2/admin/videos/{video_id} and only requires any authenticated request. ProfileServiceImpl.deleteAdminProfileVideo() deletes any ProfileVideo by ID without checking ownership or role.",
+          "Potential Impact": "Any authenticated user can delete any user's profile video (data destruction) and access an intended admin-only function.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1485",
+              "name": "Data Destruction"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Broken Object Level Authorization on vehicle location. GET /identity/api/v2/vehicle/{carId}/location (VehicleController.getLocationBOLA) looks up a VehicleDetails by UUID with no ownership check and returns the vehicle location plus the owner's fullName and email (VehicleLocationResponse). Any authenticated user can enumerate/guess UUIDs and retrieve other users' PII and location.",
+          "Potential Impact": "Mass disclosure of user names, emails, and physical vehicle locations.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "jwks.json exposes private key material. JwtProvider.getPublicJwkSet() returns this.publicJwkSet, which is the original jwkSet.toJSONObject() loaded from app.jwksJson, not the public-only JWK. Since the same JWKS must contain the private key for JWT signing (rsaKey.toKeyPair()), the unauthenticated /identity/api/auth/jwks.json endpoint can expose the RSA private key.",
+          "Potential Impact": "Attackers obtain the signing private key and can forge arbitrary RS256 tokens.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            },
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Hardcoded API gateway credentials in application.properties. The file contains api.gateway.username=vendorcrapi and api.gateway.password=Pa$$4Vendor_1 in plaintext, used by VehicleOwnershipServiceImpl to authenticate to the API gateway.",
+          "Potential Impact": "Credential disclosure to anyone with source/config access; unauthorized access to the API gateway.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "User enumeration via login and forgot-password responses. Login returns distinct messages ('EMAIL_NOT_REGISTERED' vs 'INVALID_CREDENTIALS') and forget-password returns 404 for unregistered emails versus a success message that echoes the registered email. Attackers can enumerate valid accounts.",
+          "Potential Impact": "Reconnaissance enabling targeted phishing, credential stuffing, and OTP attacks.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1589",
+              "name": "Gather Victim Identity Information"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Outbound TLS verification disabled. VehicleOwnershipServiceImpl.restTemplate() uses TrustAllStrategy and NoopHostnameVerifier, accepting any TLS certificate when calling the API gateway. A network adversary can mount an adversary-in-the-middle attack and capture VIN/ownership data and the Basic auth header.",
+          "Potential Impact": "Interception of sensitive vehicle data and gateway credentials.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "SSRF via JWT jku header. JwtProvider.getKeyFromJkuHeader() opens a URLConnection to an attacker-controlled jku URL with no scheme/host/IP allowlist. An attacker can point the server at internal metadata endpoints or internal services and receive responses/logged data.",
+          "Potential Impact": "Internal network reconnaissance and access to cloud metadata/internal services.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1090",
+              "name": "Proxy"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "No rate limiting on login, OTP, signup, or API-key endpoints. There is no rate limiter/lockout mechanism on POST /identity/api/auth/login, /forget-password, /v2/check-otp, /signup, or /identity/management/user/apikey. Attackers can brute-force credentials, repeatedly request OTPs to flood a victim's mailbox, or exhaust server resources.",
+          "Potential Impact": "Account compromise via brute force, victim email bombing, and service degradation/outage.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1110",
+              "name": "Brute Force"
+            },
+            {
+              "id": "T1667",
+              "name": "Email Bombing"
+            },
+            {
+              "id": "T1498",
+              "name": "Network Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "File uploads stored as database BLOBs without content-type validation. Profile picture and video uploads write MultipartFile bytes directly into PostgreSQL LOB columns. Spring limits a single file to 10MB and request to 50MB, but there is no image/video content-type or dimension validation, and repeated uploads inflate the database and storage.",
+          "Potential Impact": "Database/storage exhaustion and degraded service availability.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "Sensitive actions are not audited and log statements are malformed. Login, password reset, OTP validation, admin video deletion, and API-key generation are not written to a structured audit trail. Many log statements use incorrect format specifiers (e.g. log.error('...%d', exception)), producing incomplete/unusable logs.",
+          "Potential Impact": "Inability to attribute malicious actions, support investigations, or prove accountability after an incident.",
+          "MITRE_ATTACK": []
+        }
+      ],
+      "improvement_suggestions": [
+        "Restrict JWT verification to RS256 using a fixed, trusted JWKS/issuer/audience; reject HS256, 'none'/plain JWTs, and JKU-supplied keys. Validate exp/nbf/iss/aud on every token, and validate API-key signatures the same way.",
+        "Return only the public JWK (rsaKey.toPublicJWK()) from /identity/api/auth/jwks.json, and ensure the private key is never serialized into the returned JWK set.",
+        "Enforce object-level authorization in service methods: verify the requester owns the vehicle UUID before returning location/PII, and require hasRole('ADMIN') (or @PreAuthorize) on admin video deletion and other admin functions.",
+        "Add rate limiting and account lockout on login, signup, forgot-password, OTP check, and API-key endpoints using a gateway or library (e.g. bucket4j); alert on repeated failures.",
+        "Use a cryptographically secure RNG (SecureRandom) for OTPs/tokens, increase OTP length and add short expiry, hash OTPs at rest, and cap OTP validation attempts globally (not just in v3).",
+        "Remove or protect the /reset-test-users endpoint so it cannot run in production, and stop seeding hardcoded credentials.",
+        "Eliminate shell execution for video conversion; if a subprocess is required, use ProcessBuilder with an argument array (no 'bash -c') and a strict allowlist for conversion parameters. Disable ENABLE_SHELL_INJECTION in production.",
+        "Move secrets (api.gateway.password, SMTP credentials, DB credentials) out of source/config into a secret manager or environment-injected vault; avoid hardcoded plaintext credentials.",
+        "Enable TLS certificate and hostname verification for all outbound RestTemplate/HTTP clients; remove TrustAllStrategy and NoopHostnameVerifier.",
+        "Restrict and allowlist any outbound URL fetching (jku) to trusted hosts; disable arbitrary URL resolution from token headers.",
+        "Return generic error messages for login and password/OTP flows to prevent user enumeration.",
+        "Add structured audit logging for authentication, credential changes, OTP events, and admin actions; fix log format specifiers so events are recorded correctly.",
+        "Validate uploaded file content types and dimensions, enforce stricter size limits, and stream files to object storage instead of storing them as database BLOBs."
+      ],
+      "files_analyzed": [
+        "services/identity/src/main/java/com/crapi/config/JwtProvider.java",
+        "services/identity/src/main/java/com/crapi/config/WebSecurityConfig.java",
+        "services/identity/src/main/java/com/crapi/config/JwtAuthTokenFilter.java",
+        "services/identity/src/main/java/com/crapi/config/JwtAuthEntryPoint.java",
+        "services/identity/src/main/java/com/crapi/config/InitialDataConfig.java",
+        "services/identity/src/main/java/com/crapi/config/MailConfiguration.java",
+        "services/identity/src/main/java/com/crapi/config/MailHogConfiguration.java",
+        "services/identity/src/main/java/com/crapi/controller/AuthController.java",
+        "services/identity/src/main/java/com/crapi/controller/ProfileController.java",
+        "services/identity/src/main/java/com/crapi/controller/UserController.java",
+        "services/identity/src/main/java/com/crapi/controller/VehicleController.java",
+        "services/identity/src/main/java/com/crapi/controller/ChangeEmailController.java",
+        "services/identity/src/main/java/com/crapi/controller/ChangePhoneController.java",
+        "services/identity/src/main/java/com/crapi/controller/ManagementControlller.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/UserServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/OtpServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/ProfileServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/VehicleServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/VehicleOwnershipServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/UserRegistrationServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/service/Impl/UserDetailsServiceImpl.java",
+        "services/identity/src/main/java/com/crapi/utils/BashCommand.java",
+        "services/identity/src/main/java/com/crapi/utils/ProfileValidator.java",
+        "services/identity/src/main/java/com/crapi/utils/OTPGenerator.java",
+        "services/identity/src/main/java/com/crapi/utils/EmailTokenGenerator.java",
+        "services/identity/src/main/java/com/crapi/utils/SMTPMailServer.java",
+        "services/identity/src/main/java/com/crapi/utils/MailBody.java",
+        "services/identity/src/main/java/com/crapi/entity/User.java",
+        "services/identity/src/main/java/com/crapi/entity/UserDetails.java",
+        "services/identity/src/main/java/com/crapi/entity/UserPrinciple.java",
+        "services/identity/src/main/java/com/crapi/entity/Otp.java",
+        "services/identity/src/main/java/com/crapi/entity/ProfileVideo.java",
+        "services/identity/src/main/java/com/crapi/entity/VehicleDetails.java",
+        "services/identity/src/main/java/com/crapi/entity/VehicleLocation.java",
+        "services/identity/src/main/java/com/crapi/constant/TestUsers.java",
+        "services/identity/src/main/java/com/crapi/model/LoginForm.java",
+        "services/identity/src/main/java/com/crapi/model/SignUpForm.java",
+        "services/identity/src/main/java/com/crapi/model/OtpForm.java",
+        "services/identity/src/main/java/com/crapi/model/VehicleLocationResponse.java",
+        "services/identity/src/main/resources/application.properties"
+      ]
+    },
+    {
+      "name": "API Gateway",
+      "threats": [
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "checkCreds() in main.go compares against a single hardcoded username/password (`vendorcrapi` / `Pa$$4Vendor_1`) embedded in source code. The repository is public, so any attacker can read these credentials and authenticate to both gateway endpoints as the legitimate vendor.",
+          "Potential Impact": "Attacker impersonates the vendor and gains full access to VIN ownership PII (SSN, name, address, email, phone) and payment card data.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "The TLS private key `server.key` (full RSA private key) and `server.crt` are committed to the source tree, and `http.ListenAndServeTLS` loads them directly. The certificate is self-signed/not from a trusted CA, and its private key is available to anyone with repository access.",
+          "Potential Impact": "An attacker can decrypt captured traffic or impersonate the gateway via MITM, intercepting Basic Auth credentials and sensitive PII/PCI data in transit.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            },
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "GetPayMentInfo decodes a client-supplied PaymentInfoRequest and echoes the Order.TransactionId, Order.OrderId, Amount, and User.Name fields directly into a PaymentInfoResponse while generating plausible card details. There is no validation of amount ranges, order IDs, or user identity.",
+          "Potential Impact": "An attacker can fabricate arbitrary transaction records (any amount/order ID) and obtain valid-looking card data, enabling fraud or card-testing.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "All callers authenticate with the same shared static credential, and the gateway records no per-user identity, no VIN-lookup audit trail, and no payment-request correlation beyond the shared Authorization header.",
+          "Potential Impact": "Actions cannot be attributed to an individual actor; misuse (by attacker or insider) cannot be audited or non-repudiated.",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "In GetPayMentInfo, when BasicAuth fails, the handler logs `r.Header[\"Authorization\"][0]` \u2014 the full base64-encoded credential \u2014 into application logs via `log.Printf`.",
+          "Potential Impact": "Credentials leak into stdout/log aggregation and shipping systems, where operators or attackers with log access can recover them.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "GetOwners returns full SSN, name, email, phone, and address for each VIN owner, and GetPayMentInfo returns card owner name, card type, and expiry (masked number only) to any caller holding the static credential. There is no data minimization or field-level authorization.",
+          "Potential Impact": "Mass harvesting of SSN/PII and payment card data by anyone who obtains the widely-known credential.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "`r.Header[\"Authorization\"][0]` is indexed without checking that the header exists. A request to /v1/payment with no Authorization header panics (index out of range); Go's net/http recovers per-connection, logs a stack trace, and closes the connection.",
+          "Potential Impact": "Repeated requests cause repeated panics and stack-trace log flooding, degrading service and disrupting connections.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "`json.NewDecoder(r.Body).Decode(&p_req)` runs without `http.MaxBytesReader`, accepting arbitrarily large JSON request bodies with no Content-Type or size enforcement.",
+          "Potential Impact": "Memory/CPU exhaustion from oversized payloads, leading to service degradation or outage.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "No rate limiting is applied. GetOwners and GetPayMentInfo invoke CPU-heavy faker generation on every request, and the pod is CPU-limited to 100m in the deployment.",
+          "Potential Impact": "An attacker can exhaust the gateway's CPU allocation, starving legitimate clients and making the service unresponsive.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "The app listens on port 443 (flag default), but the K8s Service targets port 8087 and the deployment's containerPort is 8087. The `SERVER_PORT` ConfigMap is never mounted or referenced (main.go also reads a flag, not the env var), so traffic routed through the K8s Service reaches a port with no listener.",
+          "Potential Impact": "The gateway is unreachable through the Kubernetes Service, causing a persistent availability failure.",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "The Dockerfile has no USER directive (debian:bookworm-slim defaults to root), and the deployment has no securityContext (runAsNonRoot, readOnlyRootFilesystem, capability drop). The process runs as root with a writable filesystem containing the TLS private key.",
+          "Potential Impact": "If the gateway process is compromised, the attacker obtains root inside the container, facilitating host escape and lateral movement.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1611",
+              "name": "Escape to Host"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "The deployment uses `crapi/gateway-service:latest` with `imagePullPolicy: Always` and no digest pinning or image-signature verification.",
+          "Potential Impact": "A republished/tampered image (via compromised registry or supply-chain attack) is pulled and executed, injecting malicious code into the running gateway.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1195",
+              "name": "Supply Chain Compromise"
+            }
+          ]
+        }
+      ],
+      "improvement_suggestions": [
+        "Replace the hardcoded vendor credential with per-client API keys or JWTs issued by the identity service; store secrets in Kubernetes Secrets/Vault and never in source code.",
+        "Remove the committed TLS private key; rotate it immediately and manage certificates via cert-manager/a CA, enabling proper TLS and optionally mTLS.",
+        "Move authentication/authorization to the gateway entry point: validate JWT tokens, propagate per-request identity to downstream services, and enforce role/per-resource authorization instead of one shared credential.",
+        "Remove logging of the Authorization header and any secret material; add redaction and structured, per-actor audit logs (actor, action, resource, timestamp) for non-repudiation.",
+        "Add input validation and schema enforcement (amount ranges, VIN format, Content-Type) and wrap request bodies with http.MaxBytesReader to prevent oversized payloads.",
+        "Implement per-IP and per-key rate limiting/quotas to protect CPU-heavy faker endpoints from resource exhaustion.",
+        "Fix the K8s port/config mismatch: align Service targetPort with the app's actual listen port (443), mount the SERVER_PORT config, and add readiness/liveness probes.",
+        "Harden the container: runAsNonRoot, readOnlyRootFilesystem, drop capabilities, set memory limits, and apply seccomp/AppArmor profiles.",
+        "Pin container images by digest (and verify signatures) instead of using `:latest` with Always pull.",
+        "Minimize data exposure: redact/mask SSN and other PII; only return fields strictly required by the consumer, and avoid returning full card metadata.",
+        "Fix the nil-safety bug at main.go:114 (check Authorization header presence before indexing) and add explicit restrictive CORS configuration at the edge/ingress.",
+        "Verify the intended architecture: current main.go serves VIN/payment data directly rather than routing to downstream microservices; if proxying is intended, centralize routing and authenticate at each hop."
+      ],
+      "files_analyzed": [
+        "services/gateway-service/main.go",
+        "services/gateway-service/Dockerfile",
+        "services/gateway-service/build-image.sh",
+        "services/gateway-service/go.mod",
+        "services/gateway-service/server.crt",
+        "services/gateway-service/server.key",
+        "deploy/k8s/base/gateway-service/deployment.yaml",
+        "deploy/k8s/base/gateway-service/config.yaml",
+        "deploy/k8s/base/gateway-service/service.yaml",
+        "deploy/docker/docker-compose.yml"
+      ]
+    },
+    {
+      "name": "Community & Social Forum",
+      "threats": [
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "The ValidateCoupon endpoint unmarshals the request body directly into a bson.M and passes it as the MongoDB filter to ValidateCode. An attacker can send {} (empty filter returns the first coupon), {\"coupon_code\": {\"$ne\": \"\"}}, {\"coupon_code\": {\"$regex\": \"^TRAC\"}}, or $or/$where-style operator documents to match a valid coupon without knowing the code, and the response returns the matched coupon code and amount.",
+          "Potential Impact": "Coupon validation bypass enabling discount/financial fraud, plus disclosure of valid coupon codes and amounts.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "The /community/api/v2/coupon/new-coupon route only requires a valid token via SetMiddlewareAuthentication; there is no role or authorization check. Any authenticated user can POST arbitrary coupon codes and amounts to be inserted into MongoDB.",
+          "Potential Impact": "Unauthorized creation of coupons, enabling financial fraud and inventory manipulation.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "In auth.ExtractTokenID, if the identity-service verify call returns HTTP 200 but the JWT has no \"sub\" claim, the code takes the fallback branch and returns (0, nil), i.e. success. The middleware therefore authorizes a request that was never bound to a real database user, and downstream handlers fall back to whatever stale global author state exists.",
+          "Potential Impact": "Authentication bypass and impersonation of arbitrary/previous users, allowing unauthorized posting, commenting, and coupon operations.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "models.FindAuthorByEmail writes the authenticated user's identity into package-level globals (autherID, nickname, userEmail, picurl, vehicleID), and Post.Prepare()/CommentOnPost later read those globals to attribute the post/comment author. Go handlers run concurrently, so two authenticated requests can interleave: request B overwrites the globals after request A authenticates but before A calls Prepare(), causing A's post/comment to be attributed to B.",
+          "Potential Impact": "Cross-user spoofing of authorship, data integrity loss, and inability to trust post/comment attribution.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "Both token.go and server.go set http.DefaultTransport's TLSClientConfig to InsecureSkipVerify: true, so the token-verification call to the identity service does not validate the server certificate. An on-path attacker can impersonate the identity service, return HTTP 200 for any token, and the community service will accept attacker-chosen JWTs (whose unverified \"sub\" claim selects the victim identity).",
+          "Potential Impact": "Full account impersonation and unauthorized access to authenticated community/coupon endpoints.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            },
+            {
+              "id": "T1550",
+              "name": "Use Alternate Authentication Material"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "auth.ExtractToken first reads the JWT from the \"token\" URL query parameter, and the Authorization header is only a fallback. Bearer tokens in URLs leak into access logs, browser history, proxies, and Referer headers.",
+          "Potential Impact": "Credential/token leakage and subsequent account takeover.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "Comment content is stored without HTML escaping: CommentOnPost sets comments.Content = postComment.Content directly, unlike Post.Prepare() which html.EscapeString's the title/content. A malicious comment containing <script> or event-handler payloads is persisted in MongoDB and returned in post JSON; if the frontend renders comment HTML, the script executes in other users' browsers.",
+          "Potential Impact": "Stored cross-site scripting leading to session hijacking, account takeover, and defacement.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1659",
+              "name": "Content Injection"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "GET /posts/{postID}, /posts/recent, and /posts/search return full Author objects (nickname, email, vehicleid, profile_pic_url) for every post and comment, and any authenticated user can request any post by ID. The title-search regex can also be used to enumerate posts and their contents.",
+          "Potential Impact": "Bulk disclosure of users' email addresses, vehicle IDs, and profile pictures; user enumeration and PII harvesting.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "GetPostsByTitle uses the user-supplied title query parameter directly as a MongoDB $regex pattern with no escaping or validation. An attacker can submit a catastrophic-backtracking regex such as (a+)+$ to force expensive regex evaluation on MongoDB for each request.",
+          "Potential Impact": "MongoDB CPU exhaustion and denial of service for the community service.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "Controllers use io.ReadAll(r.Body) without any size limit for posts, comments, and coupons. The offset parameter is parsed with ParseInt but not constrained (negative and extremely large values are passed to SetSkip), and there is no rate limiting on any authenticated endpoint.",
+          "Potential Impact": "Memory exhaustion from oversized bodies, excessive DB skip/scan load, and overall service disruption.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "When the DEBUG environment variable is set to 1, routes.go mounts net/http/pprof at /debug/pprof/ on the public router with no authentication or network restriction, exposing heap, goroutine, and CPU profiles.",
+          "Potential Impact": "Disclosure of sensitive runtime/application internals and potential resource exhaustion via profiling endpoints.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "There is no audit logging for post/comment/coupon creation or coupon validation, and authorship is not cryptographically bound to the authenticated session (it is derived from mutable package globals). A user can plausibly deny an action or be misattributed for actions they did not perform.",
+          "Potential Impact": "No accountability or forensic trail; makes abuse detection and incident response infeasible.",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "The Comment endpoint takes an arbitrary postID from the URL and appends to that post's comments without binding the comment to the authenticated user's ID (the Comments model has no author ID field and relies on transient globals). No edit/delete routes exist in the current code, but the missing ownership binding means any future comment edit/delete endpoint built on this model would have no per-comment identifier or ownership check to enforce authorization (IDOR).",
+          "Potential Impact": "Unauthorized modification of any post's comments, and an IDOR-prone design for future comment editing/deletion.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        }
+      ],
+      "improvement_suggestions": [
+        "Eliminate package-level identity globals (autherID, nickname, userEmail, picurl, vehicleID) and pass the authenticated user via per-request context populated from verified JWT claims; bind every post/comment to that user ID.",
+        "Fix ExtractTokenID to require a non-empty sub claim, validate the token signature/issuer/audience appropriately, and never return success when the identity cannot be resolved; stop using ParseUnverified for authorization decisions.",
+        "Remove InsecureSkipVerify and verify TLS certificates for the identity-service verify call; require HTTPS for all inter-service calls.",
+        "Accept bearer tokens only from the Authorization header, not from URL query parameters, and avoid logging tokens.",
+        "Never pass a raw request body as a MongoDB filter; accept only a coupon_code string and query by exact match with server-side validation.",
+        "Add role-based authorization so only administrators can create coupons.",
+        "Apply html.EscapeString (or equivalent) to comment content at write time, and enforce context-aware output encoding plus a Content-Security-Policy on the frontend to prevent stored XSS.",
+        "Use explicit request DTOs with whitelisted fields and server-side validation (call Post.Validate/Coupon.Validate, enforce length limits) instead of unmarshalling directly into persistence models; limit request body sizes with http.MaxBytesReader.",
+        "Escape or validate the title search term (e.g., regexp.QuoteMeta or exact match) and set query timeouts to prevent ReDoS.",
+        "Constrain offset/limit to safe non-negative ranges and add rate limiting to expensive endpoints.",
+        "Do not expose pprof on the public router; bind it to a localhost/admin listener or remove it in production.",
+        "Add structured audit logging for authentication and all mutating operations (who, what, when, target object), and return minimal author data (exclude email/vehicleID/profile picture unless required) to reduce PII exposure.",
+        "Restrict CORS Access-Control-Allow-Origin to known origins instead of '*' and review allowed methods/headers."
+      ],
+      "files_analyzed": [
+        "services/community/api/controllers/post_controller.go",
+        "services/community/api/controllers/coupon_controller.go",
+        "services/community/api/models/comments.go",
+        "services/community/api/router/routes.go",
+        "services/community/api/models/post.go",
+        "services/community/api/models/coupon.go",
+        "services/community/api/models/user.go",
+        "services/community/api/middlewares/middlewares.go",
+        "services/community/api/auth/token.go",
+        "services/community/api/config/Initialize_mongo.go",
+        "services/community/api/config/Initialize_postgres.go",
+        "services/community/api/responses/json.go",
+        "services/community/api/utils/utils.go",
+        "services/community/api/seed/seeder.go",
+        "services/community/api/server.go"
+      ]
+    },
+    {
+      "name": "Chatbot Service",
+      "threats": [
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "The /chatbot/genai/ask endpoint passes the raw user `message` directly into the LangGraph agent context alongside a fixed system prompt, with no input filtering or instruction/data separation. An attacker can submit 'ignore previous instructions...' style content to override the system prompt, impersonate the crAPI assistant or other identities, and steer the agent toward malicious tool use.",
+          "Potential Impact": "The agent follows attacker-controlled objectives, performs unauthorized actions through its tools, and leaks or alters data while appearing to be the legitimate assistant.",
+          "OWASP_LLM": "LLM01",
+          "OWASP_ASI": "ASI01",
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "AML.T0051",
+              "name": "LLM Prompt Injection"
+            },
+            {
+              "id": "T1659",
+              "name": "Content Injection"
+            },
+            {
+              "id": "AML.T0093",
+              "name": "Prompt Infiltration via Public-Facing Application"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "build_langgraph_agent grants the LLM an un-scoped SQLDatabaseToolkit over `postgresdb` (admin user, sslmode=disable), all MCP tools auto-generated from the full crAPI OpenAPI spec, and a RAG retriever, with a system prompt that explicitly authorizes code execution and attack simulation. There is no tool allowlist, least-privilege scoping, or human approval step.",
+          "Potential Impact": "A single prompt can trigger destructive API calls, arbitrary database operations, or attack-simulation behavior far beyond what a support chatbot should be able to do.",
+          "OWASP_LLM": "LLM06",
+          "OWASP_ASI": "ASI02",
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "AML.T0053",
+              "name": "AI Agent Tool Invocation"
+            },
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "The LangGraph agent can emit arbitrary SQL through SQLDatabaseToolkit against the crAPI Postgres database using admin credentials. A user or prompt-injected instruction can make it SELECT emails, passwords, VINs, SSNs, coupons, orders, or JWT-related data and return the results in the chat response.",
+          "Potential Impact": "Bulk PII and credential disclosure from the backend database, enabling account takeover and further lateral movement.",
+          "OWASP_LLM": "LLM02",
+          "OWASP_ASI": "ASI02",
+          "INSIDER_CATEGORY": "Data Exfiltration",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            },
+            {
+              "id": "AML.T0036",
+              "name": "Data from Information Repositories"
+            },
+            {
+              "id": "AML.T0057",
+              "name": "LLM Data Leakage"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "The SQL toolkit is not read-only. The LLM can generate UPDATE, DELETE, INSERT, or DDL statements executed by the admin Postgres role, modifying vehicles, orders, coupons, user records, or audit data based on attacker or misdirected prompts.",
+          "Potential Impact": "Loss of data integrity, financial fraud (credit/coupon/order manipulation), account data corruption, and propagation of poisoned data to downstream crAPI consumers.",
+          "OWASP_LLM": "LLM06",
+          "OWASP_ASI": "ASI02",
+          "INSIDER_CATEGORY": "Infrastructure Sabotage",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            },
+            {
+              "id": "AML.T0101",
+              "name": "Data Destruction via AI Agent Tool Invocation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "Because SQLDatabaseToolkit runs against Postgres as `admin` with no query allowlist or sandbox, a prompt can direct the LLM to issue superuser-only statements such as `COPY ... TO PROGRAM '...'` (if the role is superuser, common for this deployment), or `pg_read_file`/`lo_import`, yielding OS command execution or file read on the database host. There is no validation of LLM-generated SQL before execution.",
+          "Potential Impact": "Remote code execution on the Postgres host, credential/secret theft from the database filesystem, and lateral movement into other internal services.",
+          "OWASP_LLM": "LLM05",
+          "OWASP_ASI": "ASI05",
+          "INSIDER_CATEGORY": "Infrastructure Sabotage",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1059",
+              "name": "Command and Scripting Interpreter"
+            },
+            {
+              "id": "AML.T0102",
+              "name": "Generate Malicious Commands"
+            },
+            {
+              "id": "AML.T0053",
+              "name": "AI Agent Tool Invocation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "MCPAuthMiddleware.__call__ allows the request through when the Authorization header is absent instead of rejecting it (only malformed/invalid headers are rejected). The MCP server listens on 0.0.0.0:5500, and get_mcp_client only adds an Authorization header when the chatbot session supplied a JWT. An attacker can therefore call MCP tools directly with no credentials.",
+          "Potential Impact": "Unauthenticated invocation of crAPI-facing MCP tools, impersonation of a legitimate client, and bypass of the identity-service validation that the middleware was meant to enforce.",
+          "OWASP_LLM": null,
+          "OWASP_ASI": null,
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "get_api_key() logs into the identity service with default service-account credentials (`admin@example.com` / `Admin!123`) and caches the resulting admin API key in a global variable. get_http_client() then injects `Authorization: ApiKey <admin key>` into every generated MCP tool call. The LLM, or any unauthenticated caller exploiting the middleware bypass, acts with admin privileges against crAPI.",
+          "Potential Impact": "Unauthorized admin operations such as deleting users' videos, resetting test users, reading all user/vehicle/workshop data, and modifying resources.",
+          "OWASP_LLM": "LLM06",
+          "OWASP_ASI": "ASI03",
+          "INSIDER_CATEGORY": "Credential Compromise",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            },
+            {
+              "id": "AML.T0055",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "The custom MCP tool get_latest_post_on_topic fetches the service account's dashboard (`/identity/api/v2/user/dashboard`) and posts the full `user_info` object as a comment (`User context: {user_info}`) on the most recent community forum post before performing the search. This leaks the admin account's PII into a forum visible to other users.",
+          "Potential Impact": "Disclosure of admin email, phone number, and account data through an unintended side effect of a 'read-only' support tool.",
+          "OWASP_LLM": "LLM02",
+          "OWASP_ASI": "ASI02",
+          "INSIDER_CATEGORY": "Data Exfiltration",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1567",
+              "name": "Exfiltration Over Web Service"
+            },
+            {
+              "id": "AML.T0086",
+              "name": "Exfiltration via AI Agent Tool Invocation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "The MCP server auto-generates tools from crapi-openapi-spec.json, including `contact_mechanic` whose request body contains `mechanic_api` (a URL string). The agent can supply attacker-controlled internal URLs, causing the downstream crAPI web service to fetch them server-side. Additionally, the custom `debug_web_service(path)` tool concatenates an unvalidated `path` into `/debug/{path}` before making an HTTP request.",
+          "Potential Impact": "Server-side request forgery against internal services and cloud metadata endpoints, internal network scanning, and retrieval of internal-only data through the chatbot/MCP path.",
+          "OWASP_LLM": "LLM05",
+          "OWASP_ASI": "ASI02",
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "AML.T0053",
+              "name": "AI Agent Tool Invocation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "add_to_chroma_collection stores every session's chat messages in a single shared Chroma `chats` collection, tagging them only with metadata. The retriever tool `chat_rag` then performs `retriever.invoke(query)` without filtering by the current session_id, so queries from one session can surface conversation content stored by other sessions.",
+          "Potential Impact": "Cross-session/cross-tenant disclosure of chat history, including any PII, credentials, or attack details previously discussed by other users.",
+          "OWASP_LLM": "LLM08",
+          "OWASP_ASI": "ASI06",
+          "INSIDER_CATEGORY": "Data Exfiltration",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            },
+            {
+              "id": "AML.T0057",
+              "name": "LLM Data Leakage"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Secrets are stored insecurely in multiple places: `.env` is present in the service directory and not excluded by .gitignore (DB/admin passwords), dbconnections.py hardcodes default credentials (`crapisecretpassword`), retrieval/instructions/keys.md contains a full RSA private JWKS (including `d`, `p`, `q`), retrieval/instructions/users.md contains SSNs and passwords, and /init stores user-provided OpenAI/Anthropic API keys in MongoDB in plaintext.",
+          "Potential Impact": "Credential and key theft, JWT forgery using the exposed private key, account takeover, and exposure of regulated PII.",
+          "OWASP_LLM": "LLM02",
+          "OWASP_ASI": null,
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            },
+            {
+              "id": "AML.T0055",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "The Chroma `chats` vector store is populated from user/assistant messages with no integrity controls and no per-session filtering on retrieval. An attacker can seed their own session with poisoned content that is later returned by `chat_rag` to other sessions, acting as indirect prompt injection that alters future agent decisions.",
+          "Potential Impact": "Cross-session agent goal hijacking, misinformation propagation, and unauthorized tool invocation based on poisoned RAG context.",
+          "OWASP_LLM": "LLM04",
+          "OWASP_ASI": "ASI06",
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "AML.T0070",
+              "name": "RAG Poisoning"
+            },
+            {
+              "id": "AML.T0071",
+              "name": "False RAG Entry Injection"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "/chatbot/genai/ask parses an unbounded JSON body, applies only `.strip()` to the message (no maximum length), and always keeps the latest message before sending it to the LLM. There is no rate limiting, and for env-configured providers (bedrock, groq, mistral, cohere, vertex) no API key/authentication is required. An attacker can flood the endpoint with very large or repeated messages.",
+          "Potential Impact": "Memory and CPU exhaustion, unbounded LLM token/cost consumption, and service unavailability for legitimate users.",
+          "OWASP_LLM": "LLM10",
+          "OWASP_ASI": null,
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            },
+            {
+              "id": "AML.T0034",
+              "name": "Cost Harvesting"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "execute_langgraph_agent calls `agent.ainvoke(...)` through create_agent without explicit max-iteration, timeout, or tool-call budget configuration. Each turn can trigger SQL queries, MCP HTTP calls, Chroma writes, and embeddings. Prompt injection or repeated tool failures can cause runaway reasoning loops and repeated expensive tool invocations.",
+          "Potential Impact": "CPU, database, and LLM-provider exhaustion, cascading failure of the chatbot and downstream crAPI services, and large cloud bills.",
+          "OWASP_LLM": "LLM10",
+          "OWASP_ASI": "ASI08",
+          "INSIDER_CATEGORY": null,
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            },
+            {
+              "id": "AML.T0029",
+              "name": "Denial of AI Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "All generated MCP tool calls use a single global service-account API key, and SQL tool invocations are attributed only to the Postgres admin role. There is no tamper-evident, per-end-user audit trail binding session identity to each tool call, SQL statement, or network request. If the agent (or an attacker abusing the middleware bypass) performs destructive actions, they cannot be attributed to a specific user.",
+          "Potential Impact": "Loss of accountability and forensic evidence, difficulty detecting misuse, and inability to prove or deny who triggered a damaging action.",
+          "OWASP_LLM": "LLM09",
+          "OWASP_ASI": "ASI09",
+          "INSIDER_CATEGORY": "Deception & Evasion",
+          "MITRE_ATTACK": []
+        }
+      ],
+      "improvement_suggestions": [
+        "Fix MCPAuthMiddleware to fail closed: reject requests with a missing Authorization header instead of passing them through to the MCP application.",
+        "Do not use a shared admin service-account API key for all MCP tool calls; propagate and enforce the caller's own authenticated identity and least-privilege roles on a per-request basis.",
+        "Restrict the SQL toolkit to a read-only, least-privilege database role with an allowlist of safe tables/queries, and block superuser features such as COPY ... TO PROGRAM, pg_read_file, and DDL/DML unless explicitly authorized.",
+        "Add strict input validation and length limits on /ask message bodies, plus rate limiting and authentication on all chatbot endpoints regardless of LLM provider.",
+        "Configure the LangGraph agent with explicit max iterations, per-tool timeouts, and a total tool-call budget to prevent runaway agent loops.",
+        "Validate and sanitize all tool inputs: allowlist URL schemes/hosts for OpenAPI-generated URL fields (e.g., mechanic_api), and reject traversal/absolute URLs in debug_web_service paths.",
+        "Scope RAG retrieval by session_id and isolate tenant data in the Chroma collection; redact or drop sensitive content before embedding.",
+        "Move secrets out of the repository and code: remove/rotate .env, hardcoded default passwords, the private JWKS in retrieval docs, and SSN/password data; store secrets in a vault and inject them at runtime.",
+        "Encrypt or vault user-provided LLM API keys instead of storing them in plaintext MongoDB, and stop logging key prefixes.",
+        "Restrict CORS to explicit origins, add SameSite attributes to the session cookie, and require authentication for chatbot state/history/reset endpoints.",
+        "Enable immutable, agent-write-protected audit logging of every tool call, SQL statement, and outbound network request, correlated with the end-user/session identity.",
+        "Disable TLS verification (verify=False) only for explicitly trusted internal endpoints, and pin/continuously verify LLM/agent dependencies (langchain, fastmcp, unstructured, chromadb) for supply-chain vulnerabilities.",
+        "Apply egress allowlisting for the chatbot/MCP execution environment so agent-initiated network requests can only reach approved internal services."
+      ],
+      "files_analyzed": [
+        "services/chatbot/entrypoint.sh",
+        "services/chatbot/Dockerfile",
+        "services/chatbot/requirements.txt",
+        "services/chatbot/.env",
+        "services/chatbot/src/chatbot/app.py",
+        "services/chatbot/src/chatbot/chat_api.py",
+        "services/chatbot/src/chatbot/chat_service.py",
+        "services/chatbot/src/chatbot/langgraph_agent.py",
+        "services/chatbot/src/chatbot/agent_utils.py",
+        "services/chatbot/src/chatbot/config.py",
+        "services/chatbot/src/chatbot/session_service.py",
+        "services/chatbot/src/chatbot/mcp_client.py",
+        "services/chatbot/src/chatbot/retriever_utils.py",
+        "services/chatbot/src/chatbot/dbconnections.py",
+        "services/chatbot/src/chatbot/extensions.py",
+        "services/chatbot/src/chatbot/aws_credentials.py",
+        "services/chatbot/src/mcpserver/server.py",
+        "services/chatbot/src/mcpserver/tool_helpers.py",
+        "services/chatbot/src/mcpserver/config.py",
+        "services/chatbot/src/mcpserver/__main__.py",
+        "services/chatbot/src/mcpserver/auth/middleware.py",
+        "services/chatbot/src/resources/crapi-openapi-spec.json",
+        "services/chatbot/retrieval/instructions/users.md",
+        "services/chatbot/retrieval/instructions/keys.md"
+      ]
+    },
+    {
+      "name": "Infrastructure & Deployment Configuration",
+      "threats": [
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "The RSA private key used to sign JWTs is committed to the repository in plaintext at deploy/docker/keys/jwks.json, deploy/k8s/keys/jwks.json, and deploy/helm/keys/jwks.json (all three contain the full 'd', 'p', 'q', 'dp', 'dq', 'qi' parameters for kid 'MKMZkDenUfuDF2byYowDj7tW5Ox6XG4Y1THTEGScRg8'). Additionally JWT_SECRET is hardcoded as 'crapi' (deploy/helm/values.yaml, k8s ConfigMap, docker-compose). Anyone with access to the repo or the cluster can sign valid RS256 JWTs and impersonate any crAPI user, including administrators.",
+          "Potential Impact": "Full account takeover and authentication bypass across the identity service and all downstream services that trust these tokens.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            },
+            {
+              "id": "T1550",
+              "name": "Use Alternate Authentication Material"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Numerous secrets are hardcoded in plaintext in ConfigMaps, Helm values, and docker-compose rather than Secret objects: Postgres password 'crapisecretpassword' (postgres-config, identity/community/workshop/chatbot configs), MongoDB root password 'crapisecretpassword' (mongodb-config), SECRET_KEY 'crapi', TLS keystore passwords 'passw0rd', SMTP credentials, chatbot API_PASSWORD 'Admin!123', LLM API keys templated into the chatbot ConfigMap, and the MongoDB connection URI 'admin:crapisecretpassword@mongodb:27017' embedded in mailhog-configmap.",
+          "Potential Impact": "Exposure of database, email, TLS, and cloud/LLM credentials to anyone who can read ConfigMaps or the deployment files, leading to unauthorized access to all backing data stores and external services.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "deploy/k8s/base/rbac/role.yaml defines a ClusterRole ('waitfor-reader') with get/watch/list on services and pods, and rolebinding.yaml binds it via ClusterRoleBinding to the 'default' ServiceAccount in the crapi namespace. Because it is a ClusterRole/ClusterRoleBinding, every pod using the default SA (all deployments omit serviceAccountName) receives cluster-wide read access to all pods and services across all namespaces, even though only the wait-for init containers need namespace-local service lookup.",
+          "Potential Impact": "A single compromised pod can enumerate every pod and service in the cluster, facilitating lateral movement and targeting of other tenants/workloads.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1613",
+              "name": "Container and Resource Discovery"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "The MailHog deployment runs as root (securityContext runAsUser: 0 / runAsGroup: 0 in deploy/k8s/base/mailhog/deployment.yaml and deploy/helm/templates/mailhog/deployment.yaml) with no runAsNonRoot, dropped capabilities, read-only root filesystem, seccomp, or AppArmor profile. Other workloads also omit any restrictive securityContext. If MailHog is compromised, the attacker operates as root inside the container with default capabilities.",
+          "Potential Impact": "Increased likelihood of container breakout and host compromise via kernel/docker vulnerabilities.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1611",
+              "name": "Escape to Host"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "No NetworkPolicy resources exist anywhere in the repository. Postgres (5432) and MongoDB (27017) are ClusterIP services and are not directly exposed, but with default-allow pod-to-pod networking any compromised public-facing pod (crapi-web, crapi-chatbot MCP, or MailHog) can reach the databases and ChromaDB (8000) directly. In Docker Compose all services share one default bridge network with the same property. Combined with hardcoded DB credentials, this provides an easy pivot from any app compromise to full database access.",
+          "Potential Impact": "Unauthorized lateral movement and full compromise/read of application databases from any single compromised container.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1021",
+              "name": "Remote Services"
+            },
+            {
+              "id": "T1046",
+              "name": "Network Service Discovery"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "The MailHog web UI is exposed externally without authentication via LoadBalancer/NodePort (nodePort 30025 in deploy/k8s/base/mailhog/ingress.yaml and deploy/helm/templates/mailhog/ingress.yaml, port 8025 in docker-compose). MailHog stores and displays all SMTP traffic, and its ConfigMap contains the MongoDB URI with admin credentials. Anyone who can reach the exposed port can read captured emails (password resets, tokens, etc.).",
+          "Potential Impact": "Leakage of sensitive email content and the embedded MongoDB credentials to any network attacker.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1133",
+              "name": "External Remote Services"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "The chatbot MCP server (port 5500) is exposed publicly as a LoadBalancer service (nodePort 30500 in deploy/k8s/base/chatbot/ingress.yaml and deploy/helm/templates/chatbot/ingress.yaml; port 5500 in docker-compose). No authentication or network restriction is configured for the MCP endpoint, allowing anyone on the network to invoke MCP tools as a legitimate client.",
+          "Potential Impact": "Unauthenticated invocation of chatbot/MCP tools, potentially leading to data exfiltration, prompt/tool abuse, and downstream compromise.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "All application services share a single Postgres/MongoDB admin account ('admin'/'crapisecretpassword') with root privileges, and the credentials are distributed across multiple plaintext ConfigMaps. Any component or attacker that obtains these credentials can insert, modify, or delete database records directly, and there is no per-service or per-user database account separation.",
+          "Potential Impact": "Integrity loss across all application data (users, vehicles, community posts, orders) without any service-level isolation.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "Shared admin credentials are used by all services for Postgres and MongoDB, and no audit logging configuration is defined for database access or Kubernetes API access (the waitfor-reader role allows watch/list of pods/services without audit). Actions performed using these shared credentials cannot be attributed to a specific user, service, or attacker.",
+          "Potential Impact": "Inability to investigate incidents or hold actors accountable; malicious database or cluster changes can be denied.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "Many Kubernetes workloads lack complete resource limits (e.g., crapi-web has only a CPU limit of 500m and no memory limit; identity/chatbot/community have CPU limits but no memory limits; Postgres/MongoDB/ChromaDB statefulsets define no resource requests/limits). Postgres is configured with max_connections=500. Public unauthenticated endpoints (MailHog UI, chatbot MCP) can also be abused to consume resources. A compromised or runaway pod can exhaust node resources and starve all other services.",
+          "Potential Impact": "Service outage or degraded availability for the entire crAPI deployment.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            },
+            {
+              "id": "T1498",
+              "name": "Network Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "Helm defaults enable intentionally vulnerable feature flags: enableLog4j: true and enableShellInjection: true (deploy/helm/values.yaml), which are rendered into the identity ConfigMap as ENABLE_LOG4J and ENABLE_SHELL_INJECTION. The k8s base identity ConfigMap also sets ENABLE_LOG4J to 'true'. Deploying with these flags enables Log4Shell-style and shell-injection behavior in the public-facing identity service.",
+          "Potential Impact": "Remote code execution via Log4Shell or command injection against the identity service, leading to full container and data compromise.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1059",
+              "name": "Command and Scripting Interpreter"
+            }
+          ]
+        }
+      ],
+      "improvement_suggestions": [
+        "Remove the committed RSA private key from all jwks.json files, rotate it immediately, generate a unique keypair per environment, and store the private key only in a Kubernetes Secret or external KMS/Vault.",
+        "Move every secret (DB passwords, JWT secret, SECRET_KEY, TLS keystore passwords, SMTP creds, API_PASSWORD, MH_MONGO_URI, LLM/cloud API keys) out of ConfigMaps, values.yaml, and docker-compose into Kubernetes Secrets (or Docker secrets), and inject them via secretKeyRef/envFrom secretRef. Use distinct, strong, per-service credentials.",
+        "Replace the ClusterRole/ClusterRoleBinding with a namespaced Role/RoleBinding scoped to the crapi namespace and bound to a dedicated least-privilege ServiceAccount used only by the wait-for init containers, not the default ServiceAccount.",
+        "Apply NetworkPolicy objects with a default-deny posture and explicit allow-lists so Postgres (5432), MongoDB (27017), and ChromaDB (8000) are reachable only by their legitimate consumers.",
+        "Harden pod security: run as non-root (runAsNonRoot: true), drop all capabilities, set allowPrivilegeEscalation: false, use read-only root filesystems, and add seccomp/AppArmor profiles. Specifically remove runAsUser: 0/runAsGroup: 0 from MailHog.",
+        "Remove public LoadBalancer/NodePort exposure for MailHog web UI and the chatbot MCP server; keep them cluster-internal or place them behind an authenticated ingress, and add authentication to the MCP endpoint.",
+        "Define CPU and memory requests/limits for every container (including the database statefulsets) to prevent noisy-neighbor denial of service, and reduce or properly front Postgres max_connections.",
+        "Set enableLog4j and enableShellInjection to false for production (or remove the flags entirely) and ensure a patched Log4j version is used.",
+        "Enable Kubernetes audit logging and database audit logging, and replace the shared root DB accounts with least-privilege per-service accounts to support attribution and repudiation controls.",
+        "Fix deploy/k8s/base/deploy.sh, which currently runs 'kubectl create -n secret generic jwt-key-secret --from-file=../keys' (wrong namespace and missing 'secret' subcommand); use the correct 'kubectl create -n crapi secret generic jwt-key-secret --from-file=../keys'.",
+        "Keep Postgres and MongoDB as ClusterIP services and never expose them via LoadBalancer/NodePort/Ingress; consider TLS for database connections and internal mTLS.",
+        "Pin container image tags (avoid 'latest') and use image digest verification/signing to reduce supply-chain risk from the Always-pulled images."
+      ],
+      "files_analyzed": [
+        "deploy/docker/docker-compose.yml",
+        "deploy/docker/docker-compose.minimal.yml",
+        "deploy/docker/keys/jwks.json",
+        "deploy/helm/values.yaml",
+        "deploy/helm/values-safe.yaml",
+        "deploy/helm/values-tls.yaml",
+        "deploy/helm/Chart.yaml",
+        "deploy/helm/keys/jwks.json",
+        "deploy/helm/templates/rbac/role.yaml",
+        "deploy/helm/templates/rbac/rolebinding.yaml",
+        "deploy/helm/templates/identity/jwt-key-secret.yaml",
+        "deploy/helm/templates/identity/deployment.yaml",
+        "deploy/helm/templates/identity/config.yaml",
+        "deploy/helm/templates/web/ingress.yaml",
+        "deploy/helm/templates/chatbot/ingress.yaml",
+        "deploy/helm/templates/chatbot/config.yaml",
+        "deploy/helm/templates/chatbot/deployment.yaml",
+        "deploy/helm/templates/mailhog/deployment.yaml",
+        "deploy/helm/templates/mailhog/ingress.yaml",
+        "deploy/helm/templates/mailhog/config.yaml",
+        "deploy/helm/templates/workshop/config.yaml",
+        "deploy/helm/templates/community/config.yaml",
+        "deploy/helm/templates/postgres/config.yaml",
+        "deploy/helm/templates/mongodb/config.yaml",
+        "deploy/helm/templates/chromadb/config.yaml",
+        "deploy/helm/templates/api-gateway-service/config.yaml",
+        "deploy/k8s/base/rbac/role.yaml",
+        "deploy/k8s/base/rbac/rolebinding.yaml",
+        "deploy/k8s/base/identity/deployment.yaml",
+        "deploy/k8s/base/identity/config.yaml",
+        "deploy/k8s/base/identity/service.yaml",
+        "deploy/k8s/base/web/ingress.yaml",
+        "deploy/k8s/base/web/deployment.yaml",
+        "deploy/k8s/base/web/configmap.yaml",
+        "deploy/k8s/base/chatbot/ingress.yaml",
+        "deploy/k8s/base/chatbot/deployment.yaml",
+        "deploy/k8s/base/chatbot/config.yaml",
+        "deploy/k8s/base/chatbot/service.yaml",
+        "deploy/k8s/base/mailhog/ingress.yaml",
+        "deploy/k8s/base/mailhog/deployment.yaml",
+        "deploy/k8s/base/mailhog/service.yaml",
+        "deploy/k8s/base/mailhog/config.yaml",
+        "deploy/k8s/base/postgres/statefulset.yaml",
+        "deploy/k8s/base/postgres/config.yaml",
+        "deploy/k8s/base/postgres/service.yaml",
+        "deploy/k8s/base/mongodb/statefulset.yaml",
+        "deploy/k8s/base/mongodb/config.yaml",
+        "deploy/k8s/base/mongodb/service.yaml",
+        "deploy/k8s/base/workshop/deployment.yaml",
+        "deploy/k8s/base/workshop/config.yaml",
+        "deploy/k8s/base/community/deployment.yaml",
+        "deploy/k8s/base/community/config.yaml",
+        "deploy/k8s/base/gateway-service/deployment.yaml",
+        "deploy/k8s/base/gateway-service/config.yaml",
+        "deploy/k8s/base/chromadb/statefulset.yaml",
+        "deploy/k8s/base/chromadb/config.yaml",
+        "deploy/k8s/base/deploy.sh",
+        "deploy/k8s/keys/jwks.json",
+        "deploy/k8s/minikube/web/ingress.yaml",
+        "deploy/k8s/minikube/mailhog/ingress.yaml",
+        "deploy/k8s/minikube/deploy.sh"
+      ]
+    },
+    {
+      "name": "Workshop \u2014 User Authentication & Session Management",
+      "threats": [
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "utils/jwt.py does not verify the JWT signature locally. It POSTs the bearer token to the identity service and, if the response status is 200, it decodes the token with `jwt.decode(token, options={'verify_signature': False})` and trusts the `sub` claim as the authenticated user. An attacker can forge a JWT (e.g. `alg: none`) with `sub` set to a victim's email; if the identity service's verify endpoint is lax, bypassed, or spoofed, this service treats the attacker as that user.",
+          "Potential Impact": "Full account impersonation; access to the victim's orders, profile, coupons, service requests, and any role-based functionality (mechanic/admin).",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            },
+            {
+              "id": "T1550",
+              "name": "Use Alternate Authentication Material"
+            },
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "The identity-verification call uses `requests.post(identity_url, json=tokenJson, verify=False)` and the identity endpoint defaults to plaintext HTTP (`TLS_ENABLED=false` in .env). `urllib3.disable_warnings()` suppresses certificate warnings. An adversary-in-the-middle can intercept or spoof the identity service response and force an arbitrary token to be accepted, or capture the bearer JWT in transit.",
+          "Potential Impact": "Authentication bypass, bearer-token theft/credential harvesting, and session hijacking.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            },
+            {
+              "id": "T1040",
+              "name": "Network Sniffing"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "Because tokens are decoded with signature verification disabled and claims (especially `sub`) are consumed directly for the database user lookup, an attacker who obtains or crafts a token can modify claims such as `sub`, `role`, or `exp` and the modification is not detected by this service. Authorization is then based entirely on attacker-controlled claim data.",
+          "Potential Impact": "Account switching and privilege escalation without detection; unauthorized actions attributed to another user.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            },
+            {
+              "id": "T1550",
+              "name": "Use Alternate Authentication Material"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "AdminUserView (`/workshop/api/management/users/all`) is decorated only with `@jwt_auth_required` and performs no check that `user.role == User.ROLE_CHOICES.ADMIN`. Any authenticated user (default USER role, mechanic, etc.) can invoke this management endpoint.",
+          "Potential Impact": "Vertical privilege escalation: non-admin users access admin/management functionality, enabling bulk user data retrieval and further attacks.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "AdminUserView serializes every `UserDetails` row with `UserDetailsSerializer`, which exposes each user's email and phone number (nested `UserSerializer`) plus `available_credit`. Combined with the missing role check, any logged-in user can page through the entire user base.",
+          "Potential Impact": "Mass PII disclosure (email, phone), account enumeration, exposure of financial credit balances, and material for phishing/credential-stuffing campaigns.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1087",
+              "name": "Account Discovery"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "`OrderControlView.get` in crapi/shop/views.py has no `@jwt_auth_required` decorator. An unauthenticated caller can request `/workshop/api/shop/orders/<order_id>` and receive the order object, including the owner's email and phone number via `OrderSerializer`/`UserSerializer`, plus payment-gateway response data. Order IDs are sequential and guessable (IDOR).",
+          "Potential Impact": "Unauthenticated retrieval of order owners' PII and order/payment details; mass harvesting by iterating order IDs.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1087",
+              "name": "Account Discovery"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "`UserServiceRequestsView.get` in crapi/merchant/views.py has no `@jwt_auth_required` decorator and filters service requests by a caller-supplied VIN (`/workshop/api/merchant/service_requests/<vin>`). The response nests `VehicleSerializer`, which includes the vehicle owner's email and phone number, and also returns problem details/comments that may contain PII. VINs are enumerable (IDOR).",
+          "Potential Impact": "Unauthenticated disclosure of vehicle owners' email/phone and service history; mass PII harvesting via VIN enumeration.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1087",
+              "name": "Account Discovery"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Sensitive credentials are written to logs. `utils/logging.py` `log_error` logs raw `request.data`, and SignUpView passes the raw POST body (containing the plaintext password) when serializer validation fails. `utils/jwt.py` also logs the full bearer token (`tokenJson`) and verification response at debug level, which is written to `debug.log` when DEBUG/LOG_LEVEL is enabled.",
+          "Potential Impact": "Plaintext passwords and JWT bearer tokens can be harvested from log files by anyone with filesystem/log access, leading to account takeover.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "Every JWT-protected request makes a synchronous outbound `requests.post` to the identity service with no timeout and no circuit breaker. If the identity service becomes slow or unavailable, gunicorn worker threads block waiting on the request, exhausting the thread pool and making the API unresponsive.",
+          "Potential Impact": "Service-wide outage/denial of service triggered by identity-service degradation or a malicious slow response.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "Authentication/authorization decisions and access to management/user data are not recorded in an audit trail. `jwt_auth_required` only emits DEBUG-level logs about the verification call, and there is no per-user logging of who accessed which records (e.g., AdminUserView or order/profile lookups).",
+          "Potential Impact": "Unauthorized access cannot be reliably detected, investigated, or attributed; an attacker using a forged or stolen token can deny actions.",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "`SECRET_KEY` is hardcoded to `crapi` in the committed `.env`, while `ALLOWED_HOSTS = ['*']` and `CORS_ORIGIN_ALLOW_ALL = True` are set. A known/guessable Django SECRET_KEY allows forging signed cookies/session data for Django session- and admin-based components.",
+          "Potential Impact": "Session forgery, Django admin/session hijacking, and CSRF token forgery.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Hardcoded credentials are stored in source/config: `crapi_site/settings.py` contains API gateway credentials (`API_GATEWAY_USERNAME='vendorcrapi'`, `API_GATEWAY_PASSWORD='Pa$$4Vendor_1'`), and `.env` contains DB and MongoDB passwords. These are available in plaintext to anyone with repository/config access.",
+          "Potential Impact": "Credential exposure enabling payment-gateway abuse, database compromise, and lateral movement.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        }
+      ],
+      "improvement_suggestions": [
+        "Verify JWT signatures locally with PyJWT using an explicit `algorithms` allowlist (reject `alg: none`) and a strong secret/public key; validate `exp`, `nbf`, `iss`, and `aud`. Never use `verify_signature=False`.",
+        "Enforce role-based access control on AdminUserView and other management endpoints by checking `user.role == User.ROLE_CHOICES.ADMIN` and rejecting non-admin callers.",
+        "Add authentication and object-ownership checks to all object-retrieval endpoints (OrderControlView.get, UserServiceRequestsView.get, ServiceRequestView.get) to eliminate IDOR; return 404/403 instead of data for unauthorized lookups.",
+        "Redact sensitive data in logs: never log request bodies containing passwords, coupon codes, or JWT tokens; filter tokens in debug output.",
+        "Use TLS with certificate verification (`verify=True`) for all outbound calls to identity/payment services; remove `urllib3.disable_warnings()` and do not send JWTs over plaintext HTTP.",
+        "Add timeouts and a circuit breaker to the identity verification HTTP call so identity-service outages fail closed instead of blocking worker threads.",
+        "Implement audit logging for authentication/authorization decisions and sensitive data access (who accessed what, when, from where) to support non-repudiation.",
+        "Rotate and externalize all hardcoded secrets (SECRET_KEY, API_GATEWAY_PASSWORD, DB/Mongo credentials); use a secrets manager and generate a strong unique SECRET_KEY.",
+        "Restrict ALLOWED_HOSTS and CORS_ORIGIN_ALLOW_ALL; whitelist only trusted origins and hosts.",
+        "Add rate limiting to authentication and registration endpoints, enable Django password validators, and avoid `@csrf_exempt` where session-based auth is possible.",
+        "Avoid storing raw JWT tokens in the `user_login.jwt_token` column; use short-lived tokens with server-side revocation/refresh instead."
+      ],
+      "files_analyzed": [
+        "crapi/user/views.py",
+        "crapi/user/models.py",
+        "crapi/user/serializers.py",
+        "crapi/user/urls.py",
+        "utils/jwt.py",
+        "utils/logging.py",
+        "utils/mock_methods.py",
+        "utils/messages.py",
+        "utils/helper.py",
+        "crapi_site/settings.py",
+        "crapi_site/urls.py",
+        "crapi/urls.py",
+        "crapi/apps.py",
+        "crapi/shop/views.py",
+        "crapi/shop/serializers.py",
+        "crapi/shop/models.py",
+        "crapi/shop/urls.py",
+        "crapi/mechanic/views.py",
+        "crapi/mechanic/serializers.py",
+        "crapi/mechanic/urls.py",
+        "crapi/merchant/views.py",
+        "crapi/merchant/serializers.py",
+        "crapi/merchant/urls.py",
+        "core/management/commands/seed_database.py",
+        ".env",
+        "runner.sh",
+        "Dockerfile"
+      ]
+    },
+    {
+      "name": "Workshop \u2014 E-Commerce & Orders (Shop)",
+      "threats": [
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "ApplyCouponView builds a raw SQL query by string concatenation: SELECT coupon_code FROM applied_coupon WHERE user_id = {user.id} AND coupon_code = '{user_supplied_coupon_code}'. The coupon_code comes directly from the request body with no parameterization or escaping, allowing SQL injection.",
+          "Potential Impact": "An attacker can inject SQL to bypass the coupon-already-applied check, extract data from other tables (e.g. user_login phone numbers or password hashes), or corrupt the query logic. This leads to mass data disclosure and possibly account takeover.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "ApplyCouponView credits the user's available_credit using coupon_request_body[\"amount\"], which is supplied by the client, instead of using the Coupon.amount value stored in MongoDB. The coupon code is checked for existence, but the amount is not read from the server-side coupon record.",
+          "Potential Impact": "Any authenticated user with a valid coupon code can set an arbitrary amount and grant themselves unlimited store credit, enabling fraudulent purchases and financial loss.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            },
+            {
+              "id": "T1657",
+              "name": "Financial Theft"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "The coupon reuse check in ApplyCouponView performs a non-atomic SELECT against applied_coupon and then creates an AppliedCoupon row afterward. There is no unique constraint on (user, coupon_code) and no transaction or row locking.",
+          "Potential Impact": "Concurrent requests with the same coupon code can all pass the SELECT check before any row is inserted, allowing the same coupon to be applied multiple times and the user's credit to be increased repeatedly.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            },
+            {
+              "id": "T1657",
+              "name": "Financial Theft"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "OrderControlView.get is not decorated with @jwt_auth_required and does not verify that the caller owns the requested order. GET /workshop/api/shop/orders/{order_id} returns the full order, nested user email and phone number, and also causes the server to call the payment gateway with that user's data.",
+          "Potential Impact": "An unauthenticated attacker can enumerate order IDs to harvest order history and customer PII (email, phone number), and may receive payment-related responses. This is a direct BOLA/IDOR exposure.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "ProductView.post only requires a valid JWT; there is no role or permission check. Any authenticated user can create arbitrary products, including setting the product price and image_url, through ProductSerializer.",
+          "Potential Impact": "A low-privileged user can poison the catalog, create products with arbitrary prices to exploit pricing logic, or conduct fraud against other users.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "OrderControlView.put allows a user to directly set order.status to 'returned'. When the status transitions to 'returned', the user's available_credit is increased by order.quantity * order.product.price. There is no guard preventing the user from toggling the status away and back to 'returned' multiple times.",
+          "Potential Impact": "A user can trigger repeated refunds for the same order, converting a single order into unlimited store credit and causing direct financial loss.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            },
+            {
+              "id": "T1657",
+              "name": "Financial Theft"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "ProductQuantitySerializer validates that quantity is an integer but does not enforce a minimum value. OrderControlView.post only checks available_credit against the unit product.price, not price * quantity, and then subtracts price * quantity from available_credit. The PUT handler also accepts a new quantity without recalculating credit.",
+          "Potential Impact": "A user can submit a negative quantity to increase their credit, order more items than they can afford to drive credit negative, or inflate quantity after purchase and then return the order for a larger refund.",
+          "MITRE_ATTACK": [
+            {
+              "id": "1565",
+              "name": "Data Manipulation"
+            },
+            {
+              "id": "1657",
+              "name": "Financial Theft"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "Order creation is not wrapped in transaction.atomic() and does not use select_for_update on UserDetails. The credit check, order creation, and credit deduction are separate steps, so concurrent order requests can all read the same available_credit before any deduction is saved.",
+          "Potential Impact": "An attacker can race multiple order requests against the same balance to overspend the account, create many orders, and leave the system with inconsistent or negative credit balances.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            },
+            {
+              "id": "T1657",
+              "name": "Financial Theft"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "OrderControlView.get sends customer PII and order data to settings.API_GATEWAY_URL using requests.post(..., verify=False). TLS certificate verification is disabled, and the API gateway credentials are hardcoded in crapi_site/settings.py (API_GATEWAY_USERNAME/API_GATEWAY_PASSWORD).",
+          "Potential Impact": "An on-path attacker can intercept the HTTPS request and read or modify customer PII, order amounts, and the Basic gateway credentials, enabling payment fraud or wider credential compromise.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            },
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "jwt_auth_required posts the token to the identity service with verify=False (or plain HTTP by default) and then locally decodes the JWT with verify_signature=False. The local user lookup trusts the unverified 'sub' claim after the external call returns 200.",
+          "Potential Impact": "A network attacker who can intercept or forge the identity-verification response, or a misconfigured identity service that returns 200 for malformed tokens, can cause the shop API to impersonate an arbitrary user.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            },
+            {
+              "id": "T1550",
+              "name": "Use Alternate Authentication Material"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "The unauthenticated OrderControlView.get makes a synchronous outbound payment-gateway call with a 5-second timeout for every request. ReturnOrder reads request.GET[\"order_id\"] without checking for missing keys, and several order/product lookups use unguarded .get() calls that raise 500 errors for bad IDs.",
+          "Potential Impact": "An attacker can enumerate order IDs or send malformed requests to force many slow outbound calls and repeated exceptions, exhausting worker threads and degrading or denying service to legitimate users.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "ApplyCouponView catches SQL exceptions and returns Response({\"message\": e}, status=500), exposing raw exception text to the client. Invalid product/order lookups and missing request keys also rely on unhandled exceptions that can surface stack/error details when DEBUG is enabled.",
+          "Potential Impact": "Raw database and framework error messages reveal schema, query structure, and internal implementation details that help an attacker refine SQL injection and other attacks.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "Critical financial actions such as coupon application, credit changes, order status changes, refunds, and product creation are persisted without an immutable audit trail. Only debug/error logging is used, and no actor, timestamp, previous value, or new value is recorded for these transitions.",
+          "Potential Impact": "Users can deny applying coupons, triggering refunds, or manipulating order statuses, and the organization cannot reliably investigate or attribute fraudulent transactions.",
+          "MITRE_ATTACK": []
+        }
+      ],
+      "improvement_suggestions": [
+        "Replace the raw SQL coupon check with parameterized ORM queries such as AppliedCoupon.objects.filter(user=user, coupon_code=...).exists(), and add a database unique constraint on (user_id, coupon_code).",
+        "Never trust client-supplied coupon amount; read the amount from the server-side Coupon record and ignore any amount field sent by the client.",
+        "Wrap coupon application, order creation, and refund/status updates in transaction.atomic() with select_for_update on the relevant UserDetails/Order rows to close TOCTOU and race-condition gaps.",
+        "Add @jwt_auth_required and an explicit ownership check (request user == order.user) to OrderControlView.get before returning order or payment data.",
+        "Enforce role-based authorization on ProductView.post so only administrators/merchants can create or modify products.",
+        "Disallow direct status changes to 'returned' through PUT; require the dedicated return flow and enforce valid status transitions with an idempotent refund guard.",
+        "Validate that quantity is a positive integer and that available_credit >= product.price * quantity before creating an order; reject or recalculate credit on quantity changes after order creation.",
+        "Enable TLS certificate verification on all outbound requests and move API gateway and identity-service credentials into a secrets manager instead of hardcoding them in settings.py.",
+        "Verify JWT signatures locally using the identity service's public key and require HTTPS for the identity verification endpoint; add timeouts to the identity verification request.",
+        "Add centralized validation and graceful 400/404 handling for missing or invalid order_id/product_id parameters, and return generic error messages instead of raw exception text.",
+        "Apply rate limiting and pagination limits to unauthenticated order lookup endpoints, and consider separating payment initiation from GET order retrieval to avoid attacker-triggered outbound payment calls.",
+        "Add immutable audit logging for all financial and state-changing operations, recording actor, action, previous state, new state, and timestamp."
+      ],
+      "files_analyzed": [
+        "crapi/shop/views.py",
+        "crapi/shop/models.py",
+        "crapi/shop/serializers.py",
+        "crapi/shop/urls.py",
+        "crapi/shop/tests.py",
+        "utils/jwt.py",
+        "utils/helper.py",
+        "crapi/user/models.py",
+        "crapi/user/serializers.py",
+        "crapi_site/settings.py",
+        "crapi_site/urls.py"
+      ]
+    },
+    {
+      "name": "Workshop \u2014 Mechanic & Service Requests",
+      "threats": [
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "Stored XSS via service comments and problem_details. ServiceCommentView.post (views.py) stores the raw 'comment' field with no input validation or sanitization (ServiceCommentCreateSerializer just exposes CharField). ReceiveReportView similarly stores unauthenticated 'problem_details'. These values are returned verbatim in JSON API responses and rendered into the PDF/HTML report template. Any client that renders these fields as HTML (or any template context where auto-escaping is bypassed) will execute attacker-supplied JavaScript in the victim's browser.",
+          "Potential Impact": "Session hijacking, credential theft, defacement, and actions performed on behalf of mechanics/users viewing the service request.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1659",
+              "name": "Content Injection"
+            },
+            {
+              "id": "T1203",
+              "name": "Exploitation for Client Execution"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "Broken Function Level Authorization on status updates. ServiceRequestView.put (views.py) is only decorated with @jwt_auth_required and never checks the caller's role or whether the caller is the assigned mechanic. Any authenticated user, including a regular USER role, can PUT /service_request/<id> and change the status of any service request.",
+          "Potential Impact": "Unauthorized modification of service workflow, business-logic bypass, fraud, and denial of legitimate service.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Broken Object-Level Authorization in GetReportView. GET /mechanic_report?report_id=<n> requires only a valid JWT and returns the full service request (owner email/phone, mechanic email, VIN, problem_details, comments) for any numeric report id. There is no check that the requesting user is the vehicle owner or the assigned mechanic.",
+          "Potential Impact": "Authenticated user can enumerate and harvest PII for arbitrary service requests.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Unauthenticated service request detail disclosure. ServiceRequestView.get (views.py) has no @jwt_auth_required decorator at all. GET /service_request/<id> returns the full report \u2014 comments, problem_details, owner email/phone, mechanic email, and VIN \u2014 without any credentials.",
+          "Potential Impact": "Unauthenticated PII disclosure and enumeration of service request IDs.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1213",
+              "name": "Data from Information Repositories"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Path traversal / arbitrary file read in DownloadReportView. The unauthenticated endpoint validates the 'filename' query parameter before decoding (validate_filename allows %HH sequences), then calls unquote() and joins it under BASE_DIR/reports. A filename like %2e%2e%2f%2e%2e%2fsettings.py passes validation, then decodes to ../../settings.py and escapes the reports directory, returning arbitrary files (settings.py with SECRET_KEY, db.sqlite3, /etc/passwd, etc.).",
+          "Potential Impact": "Full disclosure of source code, secrets, and database contents, enabling further compromise.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1005",
+              "name": "Data from Local System"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "JWT verification is weakened in utils/jwt.py. jwt_auth_required POSTs the token to the identity service using requests.post(..., verify=False), disabling TLS certificate verification, and then decodes the token with options={'verify_signature': False}, trusting the 'sub' claim. A network attacker can intercept/modify the verification response, or a forged/alg-none token can be accepted if the decode path is reached, allowing impersonation of any user or mechanic.",
+          "Potential Impact": "Account takeover and impersonation across every JWT-protected mechanic endpoint.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            },
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "Unauthenticated service request creation in ReceiveReportView. GET /receive_report accepts mechanic_code, vin, and problem_details with no authentication, no ownership validation, and no rate limiting. An attacker can create unlimited service requests and bloat the database. The unhandled Mechanic.DoesNotExist / Vehicle.DoesNotExist exceptions from .get() also reveal valid vs invalid codes via 500 vs 200 responses, aiding enumeration.",
+          "Potential Impact": "Resource exhaustion, database bloat, service degradation, and enumeration of valid mechanic codes and VINs.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            },
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "Broken Function-Level Authorization on comment creation. ServiceCommentView.post checks only that the caller's role is MECH; it does not verify the mechanic is assigned to the target service request. Any mechanic can post comments to any service request. ServiceCommentView.get similarly allows any authenticated user to read comments for any service request.",
+          "Potential Impact": "Unauthorized modification of service request records and cross-tenant data tampering.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "No audit trail for sensitive actions. ServiceRequest status changes and ServiceComment creation are not tied to the acting user (ServiceComment has no author field, and status updates are not logged). log_error only records serializer validation failures. An authenticated user who modifies a service request can plausibly deny the action.",
+          "Potential Impact": "Inability to attribute unauthorized changes, investigate incidents, or resolve disputes.",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "Signup enumeration and race condition. SignUpView returns distinct error messages for an existing email versus an existing mechanic_code, allowing unauthenticated enumeration of registered emails and mechanic codes. The uniqueness checks are also performed with separate exists() calls followed by create(), creating a TOCTOU race that can violate uniqueness. No rate limiting is present.",
+          "Potential Impact": "User/mechanic enumeration for targeted attacks and mass account creation.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1589",
+              "name": "Gather Victim Identity Information"
+            },
+            {
+              "id": "T1585",
+              "name": "Establish Accounts"
+            }
+          ]
+        }
+      ],
+      "improvement_suggestions": [
+        "Add object-level authorization to every service request endpoint: before GET/PUT/comment, verify request.user is the vehicle owner or the assigned mechanic (service_request.mechanic.user == user or service_request.vehicle.owner == user).",
+        "Require authentication on ServiceRequestView.get, DownloadReportView, and ReceiveReportView (or explicitly restrict/rate-limit them); remove the unauthenticated disclosure and creation paths.",
+        "Sanitize/validate comment and problem_details inputs (length limits, HTML control), and enforce context-aware output encoding in any client/PDF rendering of these fields.",
+        "Fix DownloadReportView path traversal: decode first, then validate against a strict whitelist, resolve the path with os.path.realpath, and reject any path outside the reports directory; prefer looking up reports by report id rather than accepting a filename.",
+        "Verify JWT signatures locally (remove verify_signature=False), and set verify=True on the identity HTTP call; validate iss/aud/exp claims.",
+        "Add rate limiting to signup and receive_report, and enforce uniqueness atomically via database constraints to eliminate the TOCTOU race.",
+        "Add an audit log (and author field on ServiceComment) recording the acting user for status updates and comments.",
+        "Handle DoesNotExist gracefully with 404 responses instead of 500s; ensure DEBUG is disabled in production and set ALLOWED_HOSTS explicitly rather than ['*'].",
+        "No SQL injection was found \u2014 all lookups use parameterized Django ORM calls (filter/get). Keep raw SQL out of the codebase and add strict input validation to any future search filters."
+      ],
+      "files_analyzed": [
+        "crapi/mechanic/views.py",
+        "crapi/mechanic/models.py",
+        "crapi/mechanic/serializers.py",
+        "crapi/mechanic/urls.py",
+        "crapi/mechanic/tests.py",
+        "utils/jwt.py",
+        "utils/service_report.html",
+        "crapi/user/models.py",
+        "crapi/user/serializers.py",
+        "crapi_site/settings.py"
+      ]
+    },
+    {
+      "name": "Workshop \u2014 Deployment & System Configuration",
+      "threats": [
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "The `.env` file is committed to the repository (it is not in `.gitignore`) and is copied into the Docker image via `COPY ./ /app` (it is not in `.dockerignore` either). It contains hardcoded production secrets: `DB_PASSWORD=crapisecretpassword`, `MONGO_DB_PASSWORD=crapisecretpassword`, and `SECRET_KEY=crapi`. Anyone with access to the source repo or a pulled image layer can extract these credentials.",
+          "Potential Impact": "Full database credentials (PostgreSQL and MongoDB) and the Django secret key are exposed, enabling unauthorized database access and downstream account/session compromise.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "The Django `SECRET_KEY` is set to a weak, predictable value (`crapi`) via the committed `.env`. An attacker who knows this key can forge Django session cookies, password-reset tokens, and other cryptographically signed data.",
+          "Potential Impact": "An attacker can impersonate authenticated users (including admin/mechanic roles) or complete unauthorized password resets, leading to account takeover.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1606",
+              "name": "Forge Web Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "`DEBUG` is derived from `LOG_LEVEL`: `if LOG_LEVEL == \"DEBUG\": DEBUG = True`. A production operator setting the log level to DEBUG therefore silently enables Django debug mode, and there is no separate production settings module or hard enforcement of `DEBUG=False`.",
+          "Potential Impact": "Detailed Django error pages expose stack traces, file paths, environment variable values, SQL queries, and other configuration details to unauthenticated attackers.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1083",
+              "name": "File and Directory Discovery"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "`crapi_site/settings.py` hardcodes API gateway credentials (`API_GATEWAY_USERNAME = \"vendorcrapi\"`, `API_GATEWAY_PASSWORD = \"Pa$$4Vendor_1\"`) directly in source code rather than reading them from the environment.",
+          "Potential Impact": "These credentials are exposed to anyone with source/image access and can be used to authenticate to the upstream API gateway as the vendor.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Spoofing",
+          "Scenario": "A TLS private key (`certs/server.key`) is committed to the repository and copied into the image. `runner.sh` uses this bundled key as the default certificate when `TLS_ENABLED` is true. Any party with the image/repo can obtain the private key.",
+          "Potential Impact": "Attackers can impersonate the application server (MITM) and decrypt TLS traffic that uses this certificate, defeating transport confidentiality and authenticity.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1649",
+              "name": "Steal or Forge Authentication Certificates"
+            },
+            {
+              "id": "T1552",
+              "name": "Unsecured Credentials"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "`ALLOWED_HOSTS = [\"*\"]` and `CORS_ORIGIN_ALLOW_ALL = True` are set globally. The `corsheaders.middleware.CorsMiddleware` is also placed after `CommonMiddleware`/`XFrameOptionsMiddleware`, contrary to the recommended ordering.",
+          "Potential Impact": "Any website can make credentialed cross-origin requests and read responses, enabling browser-based data theft from authenticated users. The wildcard `ALLOWED_HOSTS` also permits Host header attacks (e.g., password-reset link poisoning).",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "Both `core/management/commands/seed_database.py` and `crapi/apps.py` seed well-known mechanic accounts in production (`jhon@example.com` / `james@example.com` with password `Admin1@#` and codes `TRAC_JHN` / `TRAC_JME`). `runner.sh` runs `seed_database` automatically on every container start, and `apps.py` re-seeds on `runserver`. Password validators are also commented out in settings.",
+          "Potential Impact": "An attacker can log in with predictable default credentials and gain mechanic privileges, pivoting to other parts of the application. Weak password policy further enables credential guessing.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1078",
+              "name": "Valid Accounts"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "`ping_identity_server()` in `seed_database.py` (and other identity calls in the codebase) makes HTTPS requests with `verify=False`, disabling TLS certificate validation.",
+          "Potential Impact": "A network attacker can perform an adversary-in-the-middle attack against the identity service health/verification calls, tampering with responses and potentially disrupting or spoofing the seeding/auth flow.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Elevation of Privilege",
+          "Scenario": "The Dockerfile contains no `USER` directive and does not drop capabilities. `runner.sh` runs `migrate`, `seed_database`, and `gunicorn` as the container root user, binding to `0.0.0.0`.",
+          "Potential Impact": "A compromised application process runs as root inside the container, making it significantly easier to install tools, read mounted secrets, modify files, and exploit container/runtime vulnerabilities to escape to the host.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1611",
+              "name": "Escape to Host"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Information Disclosure",
+          "Scenario": "TLS is optional and disabled by default (`TLS_ENABLED=false` in `.env`), and there are no `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, or HSTS settings. Session and CSRF cookies are therefore transmitted over plaintext HTTP.",
+          "Potential Impact": "An on-path attacker can capture session cookies and hijack authenticated sessions.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1539",
+              "name": "Steal Web Session Cookie"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Repudiation",
+          "Scenario": "Migrations and seeding run automatically as the container root user with no per-operator identity, approval gate, or immutable audit trail. The seeded mechanic accounts (`jhon@example.com`, `james@example.com`) are shared default identities, and seed activities are only logged to a local `debug.log`.",
+          "Potential Impact": "Actions performed using shared/default accounts or by the automated seed process cannot be attributed to a specific individual, undermining accountability and incident investigation.",
+          "MITRE_ATTACK": []
+        },
+        {
+          "Threat Type": "Denial of Service",
+          "Scenario": "`runner.sh` launches gunicorn with `--log-level=debug`, and `settings.py` configures an unbounded `logging.FileHandler` at `BASE_DIR/debug.log` with no rotation. Seed functions also log entire model dicts (including password hashes and PII).",
+          "Potential Impact": "Sustained request traffic or DEBUG-level logging can fill the container's disk with logs, exhausting storage and causing service degradation/outage while also increasing sensitive-data exposure in log files.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        },
+        {
+          "Threat Type": "Tampering",
+          "Scenario": "`runner.sh` automatically runs `python3 manage.py migrate` and `python3 manage.py seed_database` on every container start, and `crapi/apps.py` also mutates data during `runserver` startup. Schema migrations and seed data are applied to the production database without a human approval or rollback gate.",
+          "Potential Impact": "A misconfigured deployment, failed upgrade, or compromised image can silently alter the production schema and insert/overwrite business data (products, users, orders, service requests) on boot, causing data corruption or integrity loss.",
+          "MITRE_ATTACK": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            }
+          ]
+        }
+      ],
+      "improvement_suggestions": [
+        "Remove `.env`, `certs/server.key`, and other secrets from the repository and Docker image; add them to `.gitignore` and `.dockerignore`, and inject secrets at runtime via a secrets manager or deploy-time env-file.",
+        "Replace the hardcoded/weak `SECRET_KEY=crapi` with a randomly generated, per-environment secret and rotate any previously exposed keys.",
+        "Set `ALLOWED_HOSTS` to an explicit allowlist and replace `CORS_ORIGIN_ALLOW_ALL = True` with an explicit `CORS_ORIGIN_WHITELIST`; reorder `CorsMiddleware` to run before `CommonMiddleware`.",
+        "Decouple `DEBUG` from `LOG_LEVEL` and enforce `DEBUG=False` in production; create a separate production settings module and add `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, `SECURE_HSTS_SECONDS`, and `SECURE_CONTENT_TYPE_NOSNIFF`.",
+        "Move `API_GATEWAY_USERNAME`/`API_GATEWAY_PASSWORD` out of source code and into environment-provided secrets.",
+        "Run the container as a non-root user via a `USER` directive, drop unnecessary Linux capabilities, and consider a read-only root filesystem.",
+        "Remove predictable default accounts from production seeding or generate random per-deployment passwords and force a password change on first login; gate seeding behind an explicit, human-invoked flag rather than running it automatically on startup.",
+        "Re-enable Django's `AUTH_PASSWORD_VALIDATORS` and enforce strong password policies.",
+        "Remove `verify=False` from all `requests` calls (including `ping_identity_server`) so TLS certificates are properly validated.",
+        "Do not bundle a TLS private key in the image; provision certificates per deployment and protect key file permissions.",
+        "Use rotating log handlers and set production gunicorn/log levels to `info` or `warning`; avoid logging password hashes and PII.",
+        "Add an approval/rollback mechanism and audit trail for production migrations and seed operations."
+      ],
+      "files_analyzed": [
+        "crapi_site/settings.py",
+        "Dockerfile",
+        "core/management/commands/seed_database.py",
+        ".env",
+        "runner.sh",
+        "build-image.sh",
+        "health.sh",
+        ".dockerignore",
+        ".gitignore",
+        "requirements.txt",
+        "manage.py",
+        "crapi_site/wsgi.py",
+        "crapi_site/urls.py",
+        "crapi/apps.py",
+        "crapi/migrations/0001_initial.py",
+        "crapi/migrations/0002_order_transaction_id.py",
+        "crapi/migrations/0003_alter_appliedcoupon_id_alter_mechanic_id_and_more.py",
+        "crapi/migrations/0004_alter_servicerequest_status_servicecomment.py"
+      ]
+    }
+  ],
+  "cross_cutting_threats": [
+    {
+      "Threat Type": "Spoofing",
+      "Scenario": "The application relies on JWTs for authorization, but the private signing key is hardcoded and committed in plaintext across multiple deployment directories. Concurrently, the Identity service fails to enforce signature checks for API keys, accepts 'alg:none', is vulnerable to algorithm confusion, and does not validate token expiration. Furthermore, the Community service implements weak verification checks and falls back to a default success state when 'sub' is missing. An attacker can construct, sign, or modify tokens to impersonate any user, including administrators, across the entire platform.",
+      "Potential Impact": "Complete authentication bypass and full platform identity takeover, allowing unauthorized access to any endpoint or user account.",
+      "Affected Subsystems": [
+        "Identity & Access Management",
+        "Community & Social Forum",
+        "Infrastructure & Deployment Configuration"
+      ]
+    },
+    {
+      "Threat Type": "Information Disclosure",
+      "Scenario": "Static, highly privileged credentials (e.g., the API Gateway credential 'vendorcrapi' / 'Pa$$4Vendor_1' and database password 'crapisecretpassword') are hardcoded in source files, application configurations, and committed deployment files. The Identity service uses these plaintext credentials to communicate with the API Gateway, while the API Gateway and Chatbot services hardcode or log them. Any compromised configuration file, log access, or repository leak exposes these secrets, granting immediate administrative access to databases, the API gateway, and backend services.",
+      "Potential Impact": "Massive credential exposure leading to unauthorized access to sensitive databases, administrative API endpoints, and payment card details.",
+      "Affected Subsystems": [
+        "Identity & Access Management",
+        "API Gateway",
+        "Chatbot Service",
+        "Infrastructure & Deployment Configuration"
+      ]
+    },
+    {
+      "Threat Type": "Information Disclosure",
+      "Scenario": "Transport-layer security is broken throughout the ecosystem. The Identity service disables hostname verification and accepts all certificates when calling the API Gateway; the Community service uses 'InsecureSkipVerify: true' when validating tokens against the Identity service; and the API Gateway service commits its TLS private key to the public repository. Additionally, the Chatbot service connects to Postgres with 'sslmode=disable'. A network attacker can perform adversary-in-the-middle (MITM) attacks on internal communications to sniff raw credentials, modify traffic, or spoof verification responses.",
+      "Potential Impact": "Interception and manipulation of sensitive data (such as PII, VINs, and credentials) in transit; spoofing of authorization decisions.",
+      "Affected Subsystems": [
+        "Identity & Access Management",
+        "API Gateway",
+        "Community & Social Forum",
+        "Chatbot Service"
+      ]
+    },
+    {
+      "Threat Type": "Elevation of Privilege",
+      "Scenario": "All application services share a single database administrator account with root privileges, and no network segmentation or Kubernetes NetworkPolicies are configured to isolate components. If a highly vulnerable service\u2014such as the Chatbot (which executes raw, unvalidated SQL statements generated by an LLM agent with admin access) or the Identity service (which permits shell command injection)\u2014is compromised, the attacker can leverage the flat network and shared superuser credentials to pivot, inspect, and modify databases and resources across all other subsystems.",
+      "Potential Impact": "Lateral movement and total compromise of all application databases (users, vehicles, community posts, orders) from any single compromised service container.",
+      "Affected Subsystems": [
+        "Chatbot Service",
+        "Community & Social Forum",
+        "Infrastructure & Deployment Configuration",
+        "Identity & Access Management"
+      ]
+    },
+    {
+      "Threat Type": "Denial of Service",
+      "Scenario": "There is a systemic lack of rate limiting, request size limits (such as missing 'http.MaxBytesReader' or unbounded payload parsing), and Kubernetes resource constraints across the deployment. Attackers can flood unauthenticated endpoints (like the MailHog web UI, Chatbot MCP, login, and registration APIs) or craft heavy queries (such as catastrophic regex backtracking in the Forum or infinite agent tool loops in the Chatbot), easily exhausting CPU, memory, and database connections to disrupt the entire platform.",
+      "Potential Impact": "Platform-wide service degradation, cascading failures, high cloud utility costs, and prolonged outages for all services.",
+      "Affected Subsystems": [
+        "Identity & Access Management",
+        "API Gateway",
+        "Community & Social Forum",
+        "Chatbot Service",
+        "Infrastructure & Deployment Configuration"
+      ]
+    },
+    {
+      "Threat Type": "Spoofing",
+      "Scenario": "Across multiple subsystems (User Authentication, Shop, and Mechanic), token verification logic in `utils/jwt.py` disables signature verification (`verify_signature=False`) and trusts client-side claims. Additionally, HTTP/HTTPS requests to the identity service are performed with TLS verification disabled (`verify=False`).",
+      "Potential Impact": "Complete authentication bypass and account/mechanic/admin impersonation. An attacker or adversary-in-the-middle can craft arbitrary JWTs or spoof responses to hijack any session across the entire application ecosystem.",
+      "Affected Subsystems": [
+        "User Authentication & Session Management",
+        "E-Commerce & Orders (Shop)",
+        "Mechanic & Service Requests",
+        "Deployment & System Configuration"
+      ],
+      "_source": "workshop pass"
+    },
+    {
+      "Threat Type": "Information Disclosure",
+      "Scenario": "High-value secrets, including the Django `SECRET_KEY`, database passwords, API Gateway credentials, and TLS private keys, are hardcoded in files (`settings.py`, `.env`, `certs/server.key`), committed to the source repository, and bundled directly into the Docker deployment images.",
+      "Potential Impact": "Unauthorized access to PostgreSQL and MongoDB databases, session cookie forgery, and decryption/tampering of TLS transport traffic, leading to full system compromise.",
+      "Affected Subsystems": [
+        "User Authentication & Session Management",
+        "E-Commerce & Orders (Shop)",
+        "Deployment & System Configuration"
+      ],
+      "_source": "workshop pass"
+    },
+    {
+      "Threat Type": "Information Disclosure",
+      "Scenario": "Endpoints across the Shop, Mechanic, and User systems either completely lack authentication decorators (such as `@jwt_auth_required`) or only validate that a generic token is present without enforcing object-level ownership checks (BOLA/IDOR). These endpoints expose serializations of customer PII (emails, phone numbers, and addresses) using sequential, guessable IDs or VINs.",
+      "Potential Impact": "Mass harvesting of customer PII, vehicle records, order history, and sensitive maintenance details via simple automated enumeration scripts.",
+      "Affected Subsystems": [
+        "User Authentication & Session Management",
+        "E-Commerce & Orders (Shop)",
+        "Mechanic & Service Requests"
+      ],
+      "_source": "workshop pass"
+    },
+    {
+      "Threat Type": "Repudiation",
+      "Scenario": "None of the subsystems (User Auth, Shop, Mechanic, or Deployment) implement a persistent, secure, and centralized audit trail. Critical actions\u2014such as coupon applications, store-credit refunds, mechanic status updates, and production seeding/migration tasks\u2014are executed without tracking who initiated them, utilizing only non-persistent, local debug files.",
+      "Potential Impact": "Inability to detect, investigate, or legally attribute fraud, administrative misuse, and security incidents. Malicious actors or compromised accounts can perform critical transactions with complete deniability.",
+      "Affected Subsystems": [
+        "User Authentication & Session Management",
+        "E-Commerce & Orders (Shop)",
+        "Mechanic & Service Requests",
+        "Deployment & System Configuration"
+      ],
+      "_source": "workshop pass"
+    },
+    {
+      "Threat Type": "Tampering",
+      "Scenario": "A systemic pattern of disabling SSL/TLS verification (`verify=False` in Python requests) exists during outbound communication with backend components (such as the payment gateway and identity verification service). Additionally, TLS is disabled by default for internal services.",
+      "Potential Impact": "Adversaries-in-the-middle can intercept and alter sensitive data in transit, including payment requests, credentials, and verification statuses, without raising connection warnings.",
+      "Affected Subsystems": [
+        "User Authentication & Session Management",
+        "E-Commerce & Orders (Shop)",
+        "Deployment & System Configuration"
+      ],
+      "_source": "workshop pass"
+    }
+  ],
+  "metadata": {
+    "worker_model": "deepseek-v4-pro",
+    "worker_provider": "DeepSeek API",
+    "architect_model": "gemini-3.5-flash",
+    "architect_provider": "Google AI API",
+    "app_type": "web",
+    "llm_calls": 68,
+    "tool_calls": 296,
+    "subsystems_analyzed": 5,
+    "references_loaded": [
+      "agentic",
+      "genai",
+      "insider_threat",
+      "mitre_atlas",
+      "mitre_enterprise"
+    ],
+    "workshop_merge": "Workshop service (Python/Django) analysed in a separate STRIDE-GPT pass 2026-08-26 and merged as 'Workshop \u2014 *' subsystems, because the whole-repo planner omitted it. Added 48 threats."
+  }
+}

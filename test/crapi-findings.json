@@ -1,0 +1,189 @@
+{
+  "source": "Finding set for crAPI, drawn from docs/challenges.md and mapped to real service files. The scanner_baseline field records what real SAST/SCA tools reported for each item: Semgrep OSS (--config=auto, 140 findings) and Trivy fs (vuln+secret+misconfig, 891 findings), run 2026-08-26. SARIF in ./scans/. The skill re-ranks these by reachability, boundary and chaining against the STRIDE-GPT threat model.",
+  "target_repo": "OWASP/crAPI",
+  "findings": [
+    {
+      "id": "F1",
+      "title": "BOLA: vehicle details of another user via vehicle ID",
+      "location": "services/identity/src/main/java/com/crapi/controller/VehicleController.java",
+      "description": "Endpoint returns vehicle information for any vehicle ID without checking ownership. IDs are GUIDs but leak via other endpoints.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F2",
+      "title": "BOLA: mechanic reports of other users via report ID",
+      "location": "services/workshop/crapi/mechanic/views.py",
+      "description": "Hidden endpoint exposes mechanic report by sequential report ID with no ownership check.",
+      "scanner_baseline": "Not detected (Semgrep flagged Jinja2/CSRF in the same file, not the BOLA)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F3",
+      "title": "Broken auth: reset another user's password via OTP brute force",
+      "location": "services/identity/src/main/java/com/crapi/controller/ChangePhoneController.java",
+      "description": "OTP verification endpoint lacks rate limiting; another user's password can be reset by brute forcing the OTP.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Critical"
+    },
+    {
+      "id": "F4",
+      "title": "Excessive data exposure: user PII leaked by list endpoint",
+      "location": "services/community/api/controllers/post_controller.go",
+      "description": "Response object includes sensitive fields (email, phone) of other users beyond what the UI needs.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Medium"
+    },
+    {
+      "id": "F5",
+      "title": "Excessive data exposure: internal video property in response",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "Video resource response includes an internal property that should not be exposed. The value enables other exploits.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Low"
+    },
+    {
+      "id": "F6",
+      "title": "Missing rate limiting: layer-7 DoS via contact-mechanic",
+      "location": "services/workshop/crapi/mechanic/views.py",
+      "description": "Contact-mechanic feature has no rate limit; repeated submissions cause a layer-7 DoS.",
+      "scanner_baseline": "Not detected (Semgrep flagged Jinja2/CSRF in the same file, not the DoS)",
+      "frontier_ai_severity": "Medium"
+    },
+    {
+      "id": "F7",
+      "title": "BFLA: delete another user's video via admin endpoint",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "Predictable admin endpoint allows deleting a video belonging to another user; no function-level authorization.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F8",
+      "title": "Mass assignment: get an item for free by editing order",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "Shadow endpoint lets a user edit arbitrary properties of an order, including refund status, without authorization.",
+      "scanner_baseline": "Not detected (Semgrep flagged SQLi/TLS elsewhere in the same file, not the mass-assignment)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F9",
+      "title": "Mass assignment: inflate account balance via refund",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "Building on the order-edit flaw, a user can grant themselves an arbitrary refund and increase their balance by $1000+.",
+      "scanner_baseline": "Not detected (Semgrep flagged SQLi/TLS elsewhere in the same file, not the mass-assignment)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F10",
+      "title": "Mass assignment: modify internal video property",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "Endpoint permits changing the internal property of a video; changing the value enables another exploit.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Medium"
+    },
+    {
+      "id": "F11",
+      "title": "SSRF: server fetches attacker-supplied URL",
+      "location": "services/workshop/crapi/merchant/views.py",
+      "description": "A feature makes an outbound HTTP call to a user-supplied URL and returns the response, enabling SSRF to internal services.",
+      "scanner_baseline": "Partially: Semgrep flagged merchant/views.py:87 as disabled-cert-validation (CWE-295 TLS), not the SSRF (attacker-controlled URL)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F12",
+      "title": "NoSQL injection: redeem coupons without a valid code",
+      "location": "services/community/api/controllers/coupon_controller.go",
+      "description": "Coupon validation is vulnerable to NoSQL injection, allowing free coupons without knowing the code.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Critical"
+    },
+    {
+      "id": "F13",
+      "title": "SQL injection: redeem an already-claimed coupon",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "Coupon redemption query is vulnerable to SQL injection, allowing modification of the database to re-redeem coupons.",
+      "scanner_baseline": "DETECTED by Semgrep: High, sqlalchemy-execute-raw-query + tainted-sql-string at shop/views.py:388-389",
+      "frontier_ai_severity": "Critical"
+    },
+    {
+      "id": "F14",
+      "title": "Unauthenticated access: endpoint performs no auth check",
+      "location": "services/workshop/crapi/urls.py",
+      "description": "An endpoint performs no authentication check and is reachable by anonymous users.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F15",
+      "title": "JWT forgery: accept tokens with weak/none algorithm",
+      "location": "services/identity/src/main/java/com/crapi/config/JwtProvider.java",
+      "description": "JWT validation accepts forgeable tokens (algorithm confusion / weak key / none), granting full platform access to any actor.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Critical"
+    },
+    {
+      "id": "F16",
+      "title": "LLM prompt injection in chatbot enables client-side injection",
+      "location": "services/chatbot/src/mcpserver",
+      "description": "Chatbot is vulnerable to prompt injection leading to client-side rendering injection.",
+      "scanner_baseline": "Not detected (Semgrep flagged Flask debug host binding in the service, not the prompt injection)",
+      "frontier_ai_severity": "Medium"
+    },
+    {
+      "id": "F17",
+      "title": "LLM chatbot leaks another user's credentials",
+      "location": "services/chatbot/src/mcpserver",
+      "description": "Chatbot can be induced to disclose another user's credentials, enabling account access.",
+      "scanner_baseline": "Not detected (Semgrep flagged Flask debug host binding in the service, not the SQL-toolkit abuse)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F18",
+      "title": "Unauthenticated arbitrary file read (path traversal)",
+      "location": "services/workshop/crapi/mechanic/views.py",
+      "description": "DownloadReportView.get has no auth decorator. validate_filename runs on the raw input (which permits %HH sequences), then unquote() decodes it, so %2e%2e%2f passes the check and becomes ../ before os.path.join. Unauthenticated arbitrary file read.",
+      "scanner_baseline": "Not detected (Semgrep flagged csrf-exempt and Jinja2 elsewhere in the file, not the traversal at line 381)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F19",
+      "title": "Unauthenticated order and customer disclosure via order ID",
+      "location": "services/workshop/crapi/shop/views.py",
+      "description": "OrderControlView.get (line 109) has no auth decorator while the post/put on the same class do. Returns order data for any order_id with no ownership check. Unauthenticated cross-tenant read.",
+      "scanner_baseline": "Not detected (Semgrep flagged TLS and SQLi elsewhere in the file, not the missing auth at line 109)",
+      "frontier_ai_severity": "High"
+    },
+    {
+      "id": "F20",
+      "title": "Unauthenticated service-request creation",
+      "location": "services/workshop/crapi/mechanic/views.py",
+      "description": "ReceiveReportView.get (line 169) has no auth decorator and creates a ServiceRequest from query params (mechanic_code, vin, problem_details). Unauthenticated write with limited blast radius.",
+      "scanner_baseline": "Not detected by Semgrep or Trivy",
+      "frontier_ai_severity": "Medium"
+    }
+  ],
+  "scanner_baseline_totals": {
+    "semgrep": {
+      "total": 140,
+      "high": 23,
+      "medium": 108,
+      "low": 9
+    },
+    "trivy": {
+      "total": 891,
+      "critical": 9,
+      "high": 224,
+      "medium": 258,
+      "low": 400
+    },
+    "combined_total": 1031,
+    "combined_critical_high": 256,
+    "app_vulns_detected": "1 of 20 (F13 SQL injection). The other 19, including every pre-auth account takeover, three unauthenticated workshop endpoints, and the mass-assignment to RCE chain, are absent from all 1031 findings."
+  },
+  "method_columns": {
+    "i_static_scans": "Semgrep OSS + Trivy fs, real run 2026-08-26. See scans/ and scanner_baseline per finding.",
+    "ii_frontier_ai": "Impact-in-the-abstract severity from a frontier model (Claude Opus 4.8) reading the code, corroborated by STRIDE-GPT's autonomous 74-threat agentic run. No reachability or chaining.",
+    "iii_prioritisation_skill": "Reachability + trust-boundary + chaining ranking. See crapi-triage-result.md Priority column."
+  }
+}

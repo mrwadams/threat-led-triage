@@ -1,0 +1,7 @@
+{
+  "name": "threat-led-triage",
+  "version": "0.1.0",
+  "description": "Rank security findings by reachability, trust boundary and chaining in a specific codebase, not by abstract severity score.",
+  "author": "Matthew Adams (github.com/mrwadams)",
+  "license": "MIT"
+}

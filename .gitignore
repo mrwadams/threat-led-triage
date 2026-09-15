@@ -1,0 +1,13 @@
+# Raw scanner output: bulky and embeds local absolute paths.
+# The headline totals are recorded in test/crapi-findings.json (scanner_baseline_totals).
+test/scans/
+
+# STRIDE-GPT run byproducts, regenerable from the repo. Keep only the final model + result.
+test/*.plan.json
+test/*.run.json
+test/*.findings.json
+test/*.bak.json
+test/*.html
+
+# Deep-dive workshop model, not part of the headline worked example.
+test/crapi-workshop-model.*
