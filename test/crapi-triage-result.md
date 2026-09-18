@@ -10,6 +10,12 @@ Trust model (from the DFD): one boundary between the Untrusted External Zone and
 Application Cluster. Everything reaches through the API Gateway. Reachability therefore turns on
 per-endpoint authentication, which was verified in code, not assumed.
 
+Provenance: the ranking, reasoning and chains below are the skill's output from the 2026-08-26 run
+and are unedited. The `frontier-AI:` prior in each section header was corrected on 2026-09-15 to
+match the `frontier_ai_severity` field in `crapi-findings.json`, the input of record; the run had
+restated several of those priors from its own judgement rather than reading the input. No rank,
+reachability call or chain depends on the prior, so none changed.
+
 ## Fix order
 
 | Rank | Finding | Reachability | Boundary crossed | Chains | Priority |
@@ -51,7 +57,7 @@ unauthenticated. That is why it ranks first even though several findings have la
 impact.
 Why this rank: unauthenticated, full-admin, and it amplifies everything else. Nothing outranks it.
 
-### 2. F3 OTP brute-force → account takeover (frontier-AI: High, now: Critical)
+### 2. F3 OTP brute-force → account takeover (frontier-AI: Critical, now: Critical)
 Reachability: unauthenticated. `/identity/api/auth/forget-password` and `/verify` are under the
 `permitAll` auth path (`AuthController.java:88,111`). No rate limiting on OTP verification, so any
 user's password is resettable by brute force.
@@ -60,7 +66,7 @@ Chains: standalone, but ATO of a chosen victim.
 Why this rank: moved up from High. Pre-auth account takeover of an arbitrary user is Critical in
 this architecture regardless of the abstract label.
 
-### 3. F10 mass-assignment of `conversion_params` → RCE (frontier-AI: Low, scanner: missed, now: Critical)
+### 3. F10 mass-assignment of `conversion_params` → RCE (frontier-AI: Medium, scanner: missed, now: Critical)
 Reachability: authenticated directly; unauthenticated in practice via F15. `PUT
 /identity/api/v2/user/videos/{id}` binds `VideoForm` including `conversion_params`
 (`ProfileController.java:95`, `ProfileServiceImpl.updateProfileVideo`). `GET
@@ -87,7 +93,7 @@ yields other users' mechanic reports (an unauth path to F2's data).
 Why this rank: the one arbitrary-read primitive that is pre-auth. Secrets on disk make it a
 force-multiplier, not just a file leak.
 
-### 5. F19 unauthenticated order + customer disclosure (frontier-AI: Medium, now: Critical)
+### 5. F19 unauthenticated order + customer disclosure (frontier-AI: High, now: Critical)
 Reachability: unauthenticated. `OrderControlView.get` has no decorator; the decorator sits on
 `post`/`put` below it (`shop/views.py:109` vs `:167`). The docstring even claims "should be
 authorised by the jwt token", but the code does not enforce it. It fetches any order by sequential
@@ -113,7 +119,7 @@ Chains: class-related to F14/F18.
 Why this rank: unauthenticated write, but lower blast radius than the account-takeover and RCE
 items above it.
 
-### 8. F14 unauthenticated workshop endpoints (frontier-AI: Medium, now: High)
+### 8. F14 unauthenticated workshop endpoints (frontier-AI: High, now: High)
 Reachability: unauthenticated. Confirmed handlers with no decorator: `ReceiveReportView.get`,
 `ServiceRequestView.get`, `DownloadReportView.get`, `OrderControlView.get`, `ReturnQRCodeView.get`
 (`shop/views.py:349`), and merchant `UserServiceRequestsView.get` (`merchant/views.py:166`).
@@ -122,7 +128,7 @@ Chains: this finding is the class that F18/F19/F20 are specific instances of.
 Why this rank: real and pre-auth, but it is partly a summary of findings already ranked
 individually, so it sits below them to avoid double-counting.
 
-### 9. F7 BFLA delete another user's video (frontier-AI: Medium, now: High)
+### 9. F7 BFLA delete another user's video (frontier-AI: High, now: High)
 Reachability: authenticated; unauthenticated via F15. `DELETE /identity/api/v2/admin/videos/{id}`
 (`ProfileController.java:129`) calls `deleteAdminProfileVideo` with no role check, so a normal user
 reaches an admin function.
@@ -130,7 +136,7 @@ Boundary: authenticated user → admin function (function-level authz).
 Chains: inherits F15's forged-admin reach.
 Why this rank: cross-privilege but destructive-only (delete), below the RCE and disclosure items.
 
-### 10. F13 SQL injection in coupon redemption (frontier-AI: High, scanner: DETECTED, now: High)
+### 10. F13 SQL injection in coupon redemption (frontier-AI: Critical, scanner: DETECTED, now: High)
 Reachability: authenticated. `ApplyCouponView.post` carries `@jwt_auth_required`
 (`shop/views.py:365`). Injectable coupon query.
 Boundary: authenticated → SQL data store.
@@ -138,7 +144,7 @@ Chains: standalone.
 Why this rank: the one finding the scanners actually caught. Real and serious, but authenticated,
 so it sits in the High band rather than above the pre-auth criticals.
 
-### 11. F11 SSRF to internal network (frontier-AI: Medium, now: High)
+### 11. F11 SSRF to internal network (frontier-AI: High, now: High)
 Reachability: authenticated. `ContactMechanicView.post` (`merchant/views.py:45`) takes a
 `mechanic_api` URL and does `requests.get(request_url, verify=False)` (`:43-47`).
 Boundary: app → internal services behind the gateway, which the DFD shows holds databases and the
@@ -146,7 +152,7 @@ Boundary: app → internal services behind the gateway, which the DFD shows hold
 Chains: internal reach can pull gateway/DB credentials the cross-cutting threats flag.
 Why this rank: authenticated, but the internal blast radius keeps it high in the band.
 
-### 12. F17 chatbot leaks another user's credentials (frontier-AI: Medium, now: High)
+### 12. F17 chatbot leaks another user's credentials (frontier-AI: High, now: High)
 Reachability: authenticated. Chatbot behind gateway auth; can be induced to disclose another user's
 credentials.
 Boundary: tenant → tenant.
@@ -166,16 +172,16 @@ is mostly as an enabler for BOLA targeting rather than a standalone breach. F16 
 injection to client-side rendering) is authenticated and scoped to the attacker's own session
 unless combined with a delivery vector not in this set.
 
-### 18-19. F8, F9 mass-assignment refund chain (frontier-AI: Medium/High, now: Medium)
+### 18-19. F8, F9 mass-assignment refund chain (frontier-AI: High, now: Medium)
 F8 (`shop/views.py` order edit) → F9 (inflate balance). Authenticated, and the attacker acts on
 their own account and balance. Real fraud, but self-scoped: no cross-tenant or system compromise,
 so Medium despite F9's "High" abstract label.
 
-### 20. F6 rate-limit DoS via contact-mechanic (frontier-AI: High, now: Low)
+### 20. F6 rate-limit DoS via contact-mechanic (frontier-AI: Medium, now: Low)
 Reachability: authenticated. `ContactMechanicView.post` is decorated (`merchant/views.py:45`), so
 the L7 DoS requires a logged-in user, and the impact is availability only with no data or privilege
 consequence.
-Why this rank: the clearest demotion. Labelled High for the scary word "DoS", but authenticated and
+Why this rank: the clearest demotion. Labelled Medium on impact alone, but authenticated and
 availability-only puts it at the bottom.
 
 ## Chains
