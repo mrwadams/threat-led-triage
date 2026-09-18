@@ -10,11 +10,12 @@ Trust model (from the DFD): one boundary between the Untrusted External Zone and
 Application Cluster. Everything reaches through the API Gateway. Reachability therefore turns on
 per-endpoint authentication, which was verified in code, not assumed.
 
-Provenance: the ranking, reasoning and chains below are the skill's output from the 2026-08-26 run
-and are unedited. The `frontier-AI:` prior in each section header was corrected on 2026-09-15 to
-match the `frontier_ai_severity` field in `crapi-findings.json`, the input of record; the run had
-restated several of those priors from its own judgement rather than reading the input. No rank,
-reachability call or chain depends on the prior, so none changed.
+Provenance: the ranking, reachability calls, chains and reasoning below are the skill's output from
+the 2026-08-26 run and are otherwise unedited. The `frontier-AI:` priors, where the run quoted them
+in section headers and in the rank 3 explanation, were corrected on 2026-09-15 to match the
+`frontier_ai_severity` field in `crapi-findings.json`, the input of record; the run had restated
+several from its own judgement rather than reading the input. No rank, reachability call or chain
+depends on the prior, so none changed.
 
 ## Fix order
 
@@ -76,7 +77,7 @@ Reachability: authenticated directly; unauthenticated in practice via F15. `PUT
 fixture already stores `"-v codec h264 && ping 8.8.8.8"`.
 Boundary: authenticated user → OS command execution on the identity host.
 Chains: F5 (discover the field exists) → F10 (set it to a shell payload) → convert_video (RCE).
-Why this rank: the frontier model called this Low because in isolation it looks like editing a
+Why this rank: the frontier model called this Medium because in isolation it looks like editing a
 metadata field. Reachability plus the convert_video sink turns it into RCE. This is exactly the
 multi-primitive chain per-finding severity misses. Note the location in the source finding set
 (`shop/views.py`) is wrong; the code is in identity `ProfileController`. See limits.
